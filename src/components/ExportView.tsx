@@ -1,10 +1,21 @@
-import { Check, Copy, Download, ExternalLink, FileText, Printer } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { APP_NAME, PDF_COLORS } from '../config.ts';
-import { usePWAInstall } from '../hooks/usePWAInstall.ts';
+import { Check, Copy, Download, FileDown, FileText, Loader2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { APP_NAME } from '../config.ts';
 import { getTodayJST, updatePdfSettings } from '../services/storeService.ts';
 import type { AppState, KnowledgeItem, PdfExportSettings, Tendency } from '../types.ts';
-import { MathText } from './MathText.tsx';
+import { buildPdfFileName, generatePdfBlobFromPages, savePdfBlob } from '../utils/pdfExport.ts';
+import { EmptySubjectsPrompt } from './EmptySubjectsPrompt.tsx';
+import {
+  chunkArray,
+  computePdfFontPt,
+  formatFolderTitle,
+  getPaperDimensions,
+  type PaperDimensions,
+  PdfBlockView,
+  type PdfPageData,
+  PdfPageSheet,
+  type PdfRenderBlock,
+} from './PdfPageRenderer.tsx';
 
 interface ExportViewProps {
   state: AppState;
@@ -15,7 +26,6 @@ type ExportTab = 'pdf' | 'anki';
 type ScopeMode = 'subject' | 'folder' | 'custom';
 
 function escapeAnkiHtmlAndMath(raw: string): string {
-  // Normalize $$...$$ and $...$ to MathJax \[...\] and \(...\) if present
   const normalizedMath = raw
     .replace(/\$\$([\s\S]+?)\$\$/g, '\\[$1\\]')
     .replace(/\$([^$\n]+?)\$/g, '\\($1\\)');
@@ -41,22 +51,92 @@ function buildAnkiTags(folderPath: string): string {
   return `${parts[0]} ${parts.slice(1).join('_')}`;
 }
 
-function computePrintFontPt(settings: PdfExportSettings): number {
-  const base = settings.fontSize === 'sm' ? 9.5 : settings.fontSize === 'lg' ? 12 : 10.5;
-  if (settings.itemsPerPage === 'auto') {
-    if (settings.columns === 3) return Math.max(8, base - 1.5);
-    if (settings.columns === 2) return Math.max(8, base - 0.5);
-    return base;
-  }
-  const perCol = settings.itemsPerPage / settings.columns;
-  if (perCol >= 18) return 8;
-  if (perCol >= 12) return Math.max(8, base - 1.5);
-  if (perCol >= 8) return Math.max(8, base - 0.5);
-  return base;
+function LazyPreviewPage({
+  page,
+  totalPages,
+  headerTitle,
+  headerMetaText,
+  settings,
+  dimensions,
+  scale,
+}: {
+  page: PdfPageData;
+  totalPages: number;
+  headerTitle: string;
+  headerMetaText: string;
+  settings: PdfExportSettings;
+  dimensions: PaperDimensions;
+  scale: number;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [isVisible, setIsVisible] = useState(page.pageNumber <= 2);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      setIsVisible(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setIsVisible(true);
+          } else if (totalPages > 12) {
+            setIsVisible(false);
+          }
+        }
+      },
+      { rootMargin: '450px 0px' }
+    );
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [totalPages]);
+
+  const scaledW = Math.max(120, Math.round(dimensions.widthPx * scale));
+  const scaledH = Math.max(160, Math.round(dimensions.heightPx * scale));
+
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      <div
+        ref={containerRef}
+        className="relative bg-white border border-slate-200 overflow-hidden"
+        style={{ width: `${scaledW}px`, height: `${scaledH}px` }}
+      >
+        {isVisible ? (
+          <div
+            style={{
+              width: `${dimensions.widthPx}px`,
+              height: `${dimensions.heightPx}px`,
+              transform: `scale(${scale})`,
+              transformOrigin: 'top left',
+            }}
+          >
+            <PdfPageSheet
+              page={page}
+              totalPages={totalPages}
+              headerTitle={headerTitle}
+              headerMetaText={headerMetaText}
+              settings={settings}
+              dimensions={dimensions}
+            />
+          </div>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-xs text-slate-400">
+            {page.pageNumber} / {totalPages}
+          </div>
+        )}
+      </div>
+      <div className="text-xs font-medium text-slate-500 tabular-nums">
+        {page.pageNumber} / {totalPages}
+      </div>
+    </div>
+  );
 }
 
 export function ExportView({ state, onStateUpdated }: ExportViewProps) {
-  const { isStandalone } = usePWAInstall();
   const [activeTab, setActiveTab] = useState<ExportTab>('pdf');
 
   // Range Selection State
@@ -72,6 +152,25 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
   const [pdf, setPdf] = useState<PdfExportSettings>(() => ({ ...state.pdfSettings }));
   const [includeHiddenTendencies, setIncludeHiddenTendencies] = useState(false);
 
+  // Pagination & Preview State
+  const [pages, setPages] = useState<PdfPageData[]>([]);
+  const [isPaginating, setIsPaginating] = useState(false);
+  const [previewWidth, setPreviewWidth] = useState(600);
+  const previewContainerRef = useRef<HTMLDivElement | null>(null);
+  const measurerRef = useRef<HTMLDivElement | null>(null);
+  const hasMeasuredOnceRef = useRef(false);
+
+  // PDF Export Generation State
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [exportProgress, setExportProgress] = useState<{ current: number; total: number } | null>(
+    null
+  );
+  const [pdfMessage, setPdfMessage] = useState<{ text: string; url?: string } | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [exportPageIndex, setExportPageIndex] = useState<number | null>(null);
+  const exportHostRef = useRef<HTMLDivElement | null>(null);
+  const exportResolveRef = useRef<((el: HTMLElement) => void) | null>(null);
+
   // Anki Options
   const [ankiDeck, setAnkiDeck] = useState('');
   const [copiedAnki, setCopiedAnki] = useState(false);
@@ -79,6 +178,39 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
   useEffect(() => {
     setPdf({ ...state.pdfSettings });
   }, [state.pdfSettings]);
+
+  // Keep selectedSubjects valid if user adds/deletes subjects
+  const prevSubjectsRef = useRef<string[]>(state.subjects);
+  useEffect(() => {
+    const prev = prevSubjectsRef.current;
+    const added = state.subjects.filter((s) => !prev.includes(s));
+    setSelectedSubjects((curr) => {
+      const valid = curr.filter((s) => state.subjects.includes(s));
+      if (prev.length === 0 && added.length > 0) {
+        return [...state.subjects];
+      }
+      return Array.from(new Set([...valid, ...added]));
+    });
+    prevSubjectsRef.current = state.subjects;
+  }, [state.subjects]);
+
+  // Measure preview viewport width for scaling paper sheets
+  useEffect(() => {
+    const el = previewContainerRef.current;
+    if (!el) return;
+    const updateWidth = () => {
+      const w = el.clientWidth;
+      if (w > 0) setPreviewWidth(w);
+    };
+    updateWidth();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => updateWidth());
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', updateWidth);
+    return () => window.removeEventListener('resize', updateWidth);
+  }, [state.subjects.length, activeTab]);
 
   const patchPdf = (patch: Partial<PdfExportSettings>) => {
     const next = { ...pdf, ...patch };
@@ -139,7 +271,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
         : selectedSubjects;
     return state.tendencies.filter((t) => {
       if (!includeHiddenTendencies && t.hidden) return false;
-      if (subjectsInScope.length === 0) return true;
+      if (subjectsInScope.length === 0) return false;
       return t.subjects.some((s) => subjectsInScope.includes(s));
     });
   }, [
@@ -151,27 +283,461 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
     selectedSubjects,
   ]);
 
-  const groupedByFolder = useMemo(() => {
-    const map = new Map<string, KnowledgeItem[]>();
+  const groupedByUnit = useMemo(() => {
+    const unitMap = new Map<
+      string,
+      {
+        directItems: KnowledgeItem[];
+        subfolders: Array<{ subfolderName: string; items: KnowledgeItem[] }>;
+        subMap: Map<string, KnowledgeItem[]>;
+      }
+    >();
+
     for (const item of filteredItems) {
-      const list = map.get(item.folder_path) ?? [];
-      list.push(item);
-      map.set(item.folder_path, list);
+      const parts = item.folder_path.split('/').filter(Boolean);
+      const unitPath = parts.length >= 2 ? `${parts[0]}/${parts[1]}` : item.folder_path;
+      let group = unitMap.get(unitPath);
+      if (!group) {
+        group = { directItems: [], subfolders: [], subMap: new Map() };
+        unitMap.set(unitPath, group);
+      }
+
+      if (parts.length >= 3) {
+        const subName = parts.slice(2).join('　');
+        const subList = group.subMap.get(subName) ?? [];
+        subList.push(item);
+        group.subMap.set(subName, subList);
+      } else {
+        group.directItems.push(item);
+      }
     }
-    return Array.from(map.entries());
+
+    return Array.from(unitMap.entries()).map(([unitPath, data]) => {
+      const subfolders = Array.from(data.subMap.entries())
+        .sort(([a], [b]) => a.localeCompare(b, 'ja'))
+        .map(([subfolderName, items]) => ({ subfolderName, items }));
+      const totalCount =
+        data.directItems.length + subfolders.reduce((acc, s) => acc + s.items.length, 0);
+      return {
+        unitPath,
+        unitTitle: formatFolderTitle(unitPath),
+        totalCount,
+        directItems: data.directItems,
+        subfolders,
+      };
+    });
   }, [filteredItems]);
 
-  const pagedItems = useMemo(() => {
-    if (pdf.itemsPerPage === 'auto' || pdf.itemsPerPage <= 0) {
-      return [filteredItems];
-    }
-    const chunks: KnowledgeItem[][] = [];
-    for (let i = 0; i < filteredItems.length; i += pdf.itemsPerPage) {
-      chunks.push(filteredItems.slice(i, i + pdf.itemsPerPage));
-    }
-    return chunks.length > 0 ? chunks : [[]];
-  }, [filteredItems, pdf.itemsPerPage]);
+  const dimensions = useMemo(() => getPaperDimensions(pdf), [pdf]);
+  const fontPt = useMemo(() => computePdfFontPt(pdf), [pdf]);
 
+  const scopeLabel = useMemo(() => {
+    if (scopeMode === 'custom') return '選択項目';
+    if (scopeMode === 'folder' && selectedFolder !== 'ALL') {
+      return selectedFolder.replace(/\//g, '_');
+    }
+    if (selectedSubjects.length === 0) return '科目未選択';
+    if (selectedSubjects.length === state.subjects.length) return '全科目';
+    return selectedSubjects.join('_');
+  }, [scopeMode, selectedFolder, selectedSubjects, state.subjects.length]);
+
+  const pdfHeaderTitle = useMemo(() => {
+    let subjectPrefix = '';
+    if (scopeMode === 'custom') {
+      const subs = Array.from(
+        new Set(filteredItems.map((i) => i.folder_path.split('/')[0]).filter(Boolean))
+      );
+      subjectPrefix = subs.join('・') || '選択項目';
+    } else if (scopeMode === 'folder' && selectedFolder !== 'ALL') {
+      subjectPrefix = formatFolderTitle(selectedFolder);
+    } else {
+      subjectPrefix = selectedSubjects.join('・') || '全科目';
+    }
+    return `${subjectPrefix}　要復習まとめ`;
+  }, [scopeMode, selectedFolder, selectedSubjects, filteredItems]);
+
+  const pdfHeaderMetaText = useMemo(() => {
+    return `${getTodayJST()} · 知識${filteredItems.length}件${
+      pdf.includeTendencies ? ` · 傾向${filteredTendencies.length}件` : ''
+    }`;
+  }, [filteredItems.length, filteredTendencies.length, pdf.includeTendencies]);
+
+  // Build ordered blocks for measurement & pagination
+  const candidateBlocks = useMemo<PdfRenderBlock[]>(() => {
+    if (filteredItems.length === 0 && filteredTendencies.length === 0) {
+      return [];
+    }
+
+    const blocks: PdfRenderBlock[] = [];
+
+    if (pdf.includeToc && groupedByUnit.length > 0) {
+      blocks.push({
+        id: 'toc',
+        kind: 'toc',
+        entries: groupedByUnit.map((g) => ({
+          label: g.unitTitle,
+          count: g.totalCount,
+        })),
+      });
+    }
+
+    if (filteredItems.length > 0) {
+      if (pdf.itemsPerPage === 'auto' && pdf.sortBy === 'folder') {
+        groupedByUnit.forEach((unitGroup, gIdx) => {
+          blocks.push({
+            id: `unit-header-${gIdx}-${unitGroup.unitPath}`,
+            kind: 'unit-header',
+            title: unitGroup.unitTitle,
+          });
+          const directRows = chunkArray(unitGroup.directItems, pdf.columns);
+          directRows.forEach((rowItems, rIdx) => {
+            blocks.push({
+              id: `unit-${gIdx}-direct-row-${rIdx}`,
+              kind: 'item-row',
+              items: rowItems,
+              showUnitBadge: false,
+            });
+          });
+          unitGroup.subfolders.forEach((sub, sIdx) => {
+            blocks.push({
+              id: `unit-${gIdx}-sub-${sIdx}`,
+              kind: 'subfolder-header',
+              title: sub.subfolderName,
+            });
+            const subRows = chunkArray(sub.items, pdf.columns);
+            subRows.forEach((rowItems, rIdx) => {
+              blocks.push({
+                id: `unit-${gIdx}-sub-${sIdx}-row-${rIdx}`,
+                kind: 'item-row',
+                items: rowItems,
+                showUnitBadge: false,
+              });
+            });
+          });
+        });
+      } else {
+        const rows = chunkArray(filteredItems, pdf.columns);
+        rows.forEach((rowItems, rIdx) => {
+          blocks.push({
+            id: `flat-row-${rIdx}`,
+            kind: 'item-row',
+            items: rowItems,
+            showUnitBadge: true,
+          });
+        });
+      }
+    }
+
+    if (pdf.includeTendencies && filteredTendencies.length > 0) {
+      blocks.push({
+        id: 'tendencies-header',
+        kind: 'tendencies-header',
+      });
+      filteredTendencies.forEach((tendency) => {
+        blocks.push({
+          id: `tendency-${tendency.tendency_id}`,
+          kind: 'tendency-row',
+          tendency,
+        });
+      });
+    }
+
+    return blocks;
+  }, [
+    filteredItems,
+    filteredTendencies,
+    groupedByUnit,
+    pdf.includeToc,
+    pdf.includeTendencies,
+    pdf.itemsPerPage,
+    pdf.sortBy,
+    pdf.columns,
+  ]);
+
+  const computePagesFromDom = useCallback(() => {
+    if (candidateBlocks.length === 0) {
+      setPages([]);
+      setIsPaginating(false);
+      return;
+    }
+
+    const host = measurerRef.current;
+    if (!host) {
+      setIsPaginating(false);
+      return;
+    }
+
+    const heightMap = new Map<string, number>();
+    const blockEls = host.querySelectorAll<HTMLElement>('[data-block-id]');
+    blockEls.forEach((el) => {
+      const id = el.dataset.blockId;
+      if (id) heightMap.set(id, el.offsetHeight);
+    });
+
+    const maxH = dimensions.availableBodyHeightPx;
+    const gapPx = 4;
+
+    const resultPages: PdfPageData[] = [];
+    let currentBlocks: PdfRenderBlock[] = [];
+    let currentHeight = 0;
+
+    const pushPage = () => {
+      if (currentBlocks.length > 0) {
+        resultPages.push({
+          pageNumber: resultPages.length + 1,
+          blocks: currentBlocks,
+        });
+        currentBlocks = [];
+        currentHeight = 0;
+      }
+    };
+
+    const appendBlock = (block: PdfRenderBlock, h: number) => {
+      const addH = currentBlocks.length > 0 ? gapPx + h : h;
+      currentBlocks.push(block);
+      currentHeight += addH;
+    };
+
+    const getH = (id: string) => heightMap.get(id) ?? 32;
+
+    // 1. TOC
+    const tocBlock = candidateBlocks.find((b) => b.kind === 'toc');
+    if (tocBlock) {
+      appendBlock(tocBlock, getH(tocBlock.id));
+    }
+
+    // 2. Knowledge Items
+    if (filteredItems.length > 0) {
+      if (pdf.itemsPerPage === 'auto' && pdf.sortBy === 'folder') {
+        let unitIndex = 0;
+        let i = 0;
+        while (i < candidateBlocks.length) {
+          const block = candidateBlocks[i];
+          if (block.kind === 'toc' || block.kind === 'tendencies-header' || block.kind === 'tendency-row') {
+            i++;
+            continue;
+          }
+
+          if (block.kind === 'unit-header') {
+            if (pdf.pageBreakPerUnit && unitIndex > 0) {
+              pushPage();
+            }
+            unitIndex++;
+
+            // Keep unit-header + immediate subfolder-header (if any) + first item-row together
+            const b1 = candidateBlocks[i + 1];
+            const b2 = candidateBlocks[i + 2];
+            if (b1 && b1.kind === 'subfolder-header' && b2 && b2.kind === 'item-row') {
+              const needed =
+                (currentBlocks.length > 0 ? gapPx : 0) +
+                getH(block.id) +
+                gapPx +
+                getH(b1.id) +
+                gapPx +
+                getH(b2.id);
+              if (currentBlocks.length > 0 && currentHeight + needed > maxH) {
+                pushPage();
+              }
+              appendBlock(block, getH(block.id));
+              appendBlock(b1, getH(b1.id));
+              appendBlock(b2, getH(b2.id));
+              i += 3;
+            } else if (b1 && b1.kind === 'item-row') {
+              const needed =
+                (currentBlocks.length > 0 ? gapPx : 0) + getH(block.id) + gapPx + getH(b1.id);
+              if (currentBlocks.length > 0 && currentHeight + needed > maxH) {
+                pushPage();
+              }
+              appendBlock(block, getH(block.id));
+              appendBlock(b1, getH(b1.id));
+              i += 2;
+            } else {
+              const h = getH(block.id);
+              if (currentBlocks.length > 0 && currentHeight + gapPx + h > maxH) {
+                pushPage();
+              }
+              appendBlock(block, h);
+              i += 1;
+            }
+            continue;
+          }
+
+          if (block.kind === 'subfolder-header') {
+            const next = candidateBlocks[i + 1];
+            if (next && next.kind === 'item-row') {
+              const needed =
+                (currentBlocks.length > 0 ? gapPx : 0) + getH(block.id) + gapPx + getH(next.id);
+              if (currentBlocks.length > 0 && currentHeight + needed > maxH) {
+                pushPage();
+              }
+              appendBlock(block, getH(block.id));
+              appendBlock(next, getH(next.id));
+              i += 2;
+            } else {
+              const h = getH(block.id);
+              if (currentBlocks.length > 0 && currentHeight + gapPx + h > maxH) {
+                pushPage();
+              }
+              appendBlock(block, h);
+              i += 1;
+            }
+            continue;
+          }
+
+          // item-row
+          const rowH = getH(block.id);
+          if (currentBlocks.length > 0 && currentHeight + gapPx + rowH > maxH) {
+            pushPage();
+          }
+          appendBlock(block, rowH);
+          i += 1;
+        }
+      } else {
+        const limitPerPage = pdf.itemsPerPage === 'auto' ? Infinity : pdf.itemsPerPage;
+        let itemsOnPage = 0;
+        const rowBlocks = candidateBlocks.filter(
+          (b): b is Extract<PdfRenderBlock, { kind: 'item-row' }> => b.kind === 'item-row'
+        );
+
+        for (const rowBlock of rowBlocks) {
+          const rowH = getH(rowBlock.id);
+          const exceedsCount = itemsOnPage > 0 && itemsOnPage >= limitPerPage;
+          const exceedsHeight =
+            currentBlocks.length > 0 && currentHeight + gapPx + rowH > maxH;
+
+          if (exceedsCount || exceedsHeight) {
+            pushPage();
+            itemsOnPage = 0;
+          }
+
+          appendBlock(rowBlock, rowH);
+          itemsOnPage += rowBlock.items.length;
+        }
+      }
+    }
+
+    // 3. Dedicated Tendencies Section
+    const tendHeader = candidateBlocks.find((b) => b.kind === 'tendencies-header');
+    const tendRows = candidateBlocks.filter(
+      (b): b is Extract<PdfRenderBlock, { kind: 'tendency-row' }> => b.kind === 'tendency-row'
+    );
+    if (tendHeader && tendRows.length > 0) {
+      if (filteredItems.length > 0) {
+        pushPage();
+      }
+      const tendHeaderH = getH(tendHeader.id);
+      const firstTendH = getH(tendRows[0].id);
+      const combinedNeeded =
+        (currentBlocks.length > 0 ? gapPx : 0) + tendHeaderH + gapPx + firstTendH;
+      if (currentBlocks.length > 0 && currentHeight + combinedNeeded > maxH) {
+        pushPage();
+      }
+      appendBlock(tendHeader, tendHeaderH);
+      appendBlock(tendRows[0], firstTendH);
+
+      for (let tIdx = 1; tIdx < tendRows.length; tIdx++) {
+        const row = tendRows[tIdx];
+        const rowH = getH(row.id);
+        if (currentBlocks.length > 0 && currentHeight + gapPx + rowH > maxH) {
+          pushPage();
+        }
+        appendBlock(row, rowH);
+      }
+    }
+
+    pushPage();
+    setPages(resultPages);
+    setIsPaginating(false);
+  }, [
+    candidateBlocks,
+    dimensions.availableBodyHeightPx,
+    filteredItems.length,
+    pdf.itemsPerPage,
+    pdf.pageBreakPerUnit,
+    pdf.sortBy,
+  ]);
+
+  // Immediate pagination on first render, 300ms debounce on subsequent settings/content updates
+  useEffect(() => {
+    if (activeTab !== 'pdf' || state.subjects.length === 0) return;
+    if (candidateBlocks.length === 0) {
+      setPages([]);
+      setIsPaginating(false);
+      return;
+    }
+
+    setIsPaginating(true);
+    const delay = hasMeasuredOnceRef.current ? 300 : 0;
+    const timer = window.setTimeout(() => {
+      hasMeasuredOnceRef.current = true;
+      requestAnimationFrame(() => computePagesFromDom());
+    }, delay);
+
+    return () => window.clearTimeout(timer);
+  }, [activeTab, state.subjects.length, candidateBlocks, computePagesFromDom]);
+
+  // Resolve single-page offscreen render promise when exportPageIndex mounts
+  useEffect(() => {
+    if (exportPageIndex === null || !exportHostRef.current || !exportResolveRef.current) return;
+    const resolver = exportResolveRef.current;
+    const host = exportHostRef.current;
+    requestAnimationFrame(() => {
+      const pageEl = host.querySelector<HTMLElement>('[data-pdf-page="true"]');
+      if (pageEl) {
+        exportResolveRef.current = null;
+        resolver(pageEl);
+      }
+    });
+  }, [exportPageIndex]);
+
+  const renderPageForExport = useCallback((pageIdx: number): Promise<HTMLElement> => {
+    return new Promise((resolve) => {
+      exportResolveRef.current = resolve;
+      setExportPageIndex(pageIdx);
+    });
+  }, []);
+
+  const handleCreatePdf = async () => {
+    if (isGeneratingPdf || pages.length === 0) return;
+    setIsGeneratingPdf(true);
+    setPdfError(null);
+    setPdfMessage(null);
+    setExportProgress({ current: 0, total: pages.length });
+
+    try {
+      const filename = buildPdfFileName(scopeLabel, getTodayJST());
+      const blob = await generatePdfBlobFromPages({
+        pages,
+        settings: pdf,
+        dimensions,
+        renderPageIntoContainer: renderPageForExport,
+        onProgress: (current, total) => setExportProgress({ current, total }),
+      });
+
+      const saved = await savePdfBlob(blob, filename);
+      if (saved.method === 'download') {
+        setPdfMessage({ text: `「${filename}」をダウンロードしました。` });
+      } else if (saved.method === 'share') {
+        setPdfMessage({ text: `「${filename}」の共有・保存メニューを開きました。` });
+      } else {
+        setPdfMessage({
+          text: `新しいタブで「${filename}」を開きました（開かない場合はリンクをタップしてください）。`,
+          url: saved.blobUrl,
+        });
+      }
+    } catch (err) {
+      setPdfError(
+        err instanceof Error ? `PDFの生成に失敗しました: ${err.message}` : 'PDFの生成に失敗しました。'
+      );
+    } finally {
+      exportResolveRef.current = null;
+      setExportPageIndex(null);
+      setIsGeneratingPdf(false);
+      setExportProgress(null);
+    }
+  };
+
+  // Anki handlers
   const ankiRows = useMemo(() => {
     const deck = ankiDeck.replace(/\t/g, ' ').trim();
     return filteredItems.map((item) => ({
@@ -204,7 +770,6 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
       setCopiedAnki(true);
       window.setTimeout(() => setCopiedAnki(false), 2500);
     } catch {
-      // Fallback textarea copy
       const ta = document.createElement('textarea');
       ta.value = ankiTsvContent;
       document.body.appendChild(ta);
@@ -226,142 +791,84 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
     URL.revokeObjectURL(url);
   };
 
-  const handlePrintPdf = () => {
-    const origTitle = document.title;
-    const subjectLabel =
-      scopeMode === 'custom'
-        ? '選択項目'
-        : selectedSubjects.length > 0
-          ? selectedSubjects.join('_')
-          : '全科目';
-    document.title = `${APP_NAME}_${subjectLabel}`;
+  if (state.subjects.length === 0) {
+    return <EmptySubjectsPrompt onStateUpdated={onStateUpdated} />;
+  }
 
-    const restore = () => {
-      document.title = origTitle;
-      window.removeEventListener('afterprint', restore);
-    };
-    window.addEventListener('afterprint', restore);
-    window.print();
-    window.setTimeout(restore, 3000);
-  };
-
-  const printFontPt = computePrintFontPt(pdf);
-  const marginMm = pdf.margin === 'narrow' ? '8mm' : '16mm';
-  const pageCss = `
-    @page {
-      size: ${pdf.paperSize} ${pdf.orientation};
-      margin: ${marginMm};
-      @bottom-center {
-        content: counter(page) " / " counter(pages);
-        font-size: 9pt;
-        color: ${PDF_COLORS.muted};
-      }
-    }
-  `;
-
-  const gridColsClass =
-    pdf.columns === 3
-      ? 'grid-cols-1 md:grid-cols-3 print:grid-cols-3'
-      : pdf.columns === 2
-        ? 'grid-cols-1 md:grid-cols-2 print:grid-cols-2'
-        : 'grid-cols-1';
-
-  const renderKnowledgeCard = (item: KnowledgeItem, showUnitBadge = false) => {
-    const isShort =
-      item.explanation.length <= 45 && !item.explanation.includes('\n');
-    return (
-      <div
-        key={item.id}
-        className="rounded-md p-2.5 break-inside-avoid border"
-        style={{
-          borderColor: PDF_COLORS.border,
-          backgroundColor: PDF_COLORS.background,
-          color: PDF_COLORS.text,
-        }}
-      >
-        {pdf.displayMode === 'headings' ? (
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="font-semibold" style={{ color: PDF_COLORS.text }}>
-              {item.heading}
-            </span>
-            <span className="text-[0.82em] tabular-nums shrink-0" style={{ color: PDF_COLORS.muted }}>
-              {showUnitBadge ? `${item.folder_path} ` : ''}
-              {pdf.showMistakeCount ? `(${item.mistake_count}回)` : ''}
-            </span>
-          </div>
-        ) : isShort ? (
-          <div className="leading-snug flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
-            <div>
-              <span className="font-semibold" style={{ color: PDF_COLORS.text }}>
-                {item.heading}：
-              </span>
-              <span
-                style={{
-                  color:
-                    pdf.displayMode === 'redsheet' ? PDF_COLORS.redSheet : PDF_COLORS.text,
-                }}
-              >
-                <MathText text={item.explanation} />
-              </span>
-            </div>
-            {(showUnitBadge || pdf.showMistakeCount) && (
-              <span className="text-[0.8em] tabular-nums shrink-0" style={{ color: PDF_COLORS.muted }}>
-                {showUnitBadge ? `${item.folder_path} ` : ''}
-                {pdf.showMistakeCount ? `(${item.mistake_count}回)` : ''}
-              </span>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-1">
-            <div className="flex items-baseline justify-between gap-2">
-              <span className="font-semibold" style={{ color: PDF_COLORS.text }}>
-                {item.heading}
-              </span>
-              {(showUnitBadge || pdf.showMistakeCount) && (
-                <span className="text-[0.8em] tabular-nums shrink-0" style={{ color: PDF_COLORS.muted }}>
-                  {showUnitBadge ? `${item.folder_path} ` : ''}
-                  {pdf.showMistakeCount ? `ミス ${item.mistake_count}回` : ''}
-                </span>
-              )}
-            </div>
-            <div
-              className="leading-relaxed"
-              style={{
-                color:
-                  pdf.displayMode === 'redsheet' ? PDF_COLORS.redSheet : PDF_COLORS.text,
-              }}
-            >
-              <MathText text={item.explanation} />
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
+  const previewScale = Math.min(1, Math.max(0.2, (previewWidth - 4) / dimensions.widthPx));
+  const hasAnyContent = filteredItems.length > 0 || filteredTendencies.length > 0;
 
   return (
-    <div className="space-y-5">
-      <style>{pageCss}</style>
+    <div className="space-y-3.5">
+      {/* Offscreen Measurer */}
+      <div
+        ref={measurerRef}
+        aria-hidden="true"
+        style={{
+          position: 'fixed',
+          left: '-99999px',
+          top: 0,
+          width: `${dimensions.contentWidthPx}px`,
+          fontSize: `${fontPt}pt`,
+          lineHeight: 1.45,
+          visibility: 'hidden',
+          pointerEvents: 'none',
+          fontFamily:
+            '-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif',
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+          {candidateBlocks.map((block) => (
+            <div key={block.id} data-block-id={block.id}>
+              <PdfBlockView block={block} settings={pdf} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Offscreen Single-Page Export Render Host */}
+      {exportPageIndex !== null && pages[exportPageIndex] && (
+        <div
+          ref={exportHostRef}
+          aria-hidden="true"
+          style={{
+            position: 'fixed',
+            left: '-99999px',
+            top: 0,
+            pointerEvents: 'none',
+            zIndex: -1,
+          }}
+        >
+          <PdfPageSheet
+            page={pages[exportPageIndex]}
+            totalPages={pages.length}
+            headerTitle={pdfHeaderTitle}
+            headerMetaText={pdfHeaderMetaText}
+            settings={pdf}
+            dimensions={dimensions}
+          />
+        </div>
+      )}
 
       {/* Top Mode Switcher & Action Bar */}
-      <div className="no-print bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+      <div className="bg-white border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
           <button
             type="button"
             onClick={() => setActiveTab('pdf')}
-            className={`min-h-[44px] inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+            className={`min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === 'pdf'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Printer className="w-4 h-4" />
-            <span>PDF出力（印刷）</span>
+            <FileDown className="w-4 h-4" />
+            <span>PDF出力</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('anki')}
-            className={`min-h-[44px] inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+            className={`min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
               activeTab === 'anki'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
@@ -373,35 +880,35 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
         </div>
 
         {activeTab === 'pdf' ? (
-          <div className="flex flex-wrap items-center gap-2">
-            {isStandalone && (
-              <a
-                href={window.location.href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-50"
-              >
-                <ExternalLink className="w-4 h-4" />
-                <span>ブラウザで開く</span>
-              </a>
+          <button
+            type="button"
+            onClick={() => void handleCreatePdf()}
+            disabled={!hasAnyContent || pages.length === 0 || isGeneratingPdf || isPaginating}
+            className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 disabled:bg-slate-300 cursor-pointer"
+          >
+            {isGeneratingPdf ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>
+                  {exportProgress
+                    ? `作成中 (${exportProgress.current}/${exportProgress.total}ページ)`
+                    : 'PDFを作成中...'}
+                </span>
+              </>
+            ) : (
+              <>
+                <Download className="w-4 h-4" />
+                <span>PDF作成</span>
+              </>
             )}
-            <button
-              type="button"
-              onClick={handlePrintPdf}
-              disabled={filteredItems.length === 0 && filteredTendencies.length === 0}
-              className="min-h-[44px] inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 disabled:bg-slate-300 cursor-pointer"
-            >
-              <Printer className="w-4 h-4" />
-              <span>PDFとして保存 / 印刷</span>
-            </button>
-          </div>
+          </button>
         ) : (
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => void handleCopyAnki()}
               disabled={ankiRows.length === 0}
-              className="min-h-[44px] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-blue-900 text-blue-900 bg-white text-xs font-semibold hover:bg-blue-50 disabled:opacity-40 cursor-pointer"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-blue-900 text-blue-900 bg-white text-xs font-semibold hover:bg-blue-50 disabled:opacity-40 cursor-pointer"
             >
               {copiedAnki ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
               <span>{copiedAnki ? 'コピーしました' : 'クリップボードにコピー'}</span>
@@ -410,7 +917,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
               type="button"
               onClick={handleDownloadAnkiTxt}
               disabled={ankiRows.length === 0}
-              className="min-h-[44px] inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 disabled:bg-slate-300 cursor-pointer"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 disabled:bg-slate-300 cursor-pointer"
             >
               <Download className="w-4 h-4" />
               <span>.txt で保存（{ankiRows.length}件）</span>
@@ -419,9 +926,31 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
         )}
       </div>
 
+      {pdfError && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs text-red-800">
+          {pdfError}
+        </div>
+      )}
+
+      {pdfMessage && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs text-emerald-900 flex flex-wrap items-center justify-between gap-2">
+          <span>{pdfMessage.text}</span>
+          {pdfMessage.url && (
+            <a
+              href={pdfMessage.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold text-blue-900 underline"
+            >
+              PDFを開く
+            </a>
+          )}
+        </div>
+      )}
+
       {/* Range & Format Options */}
-      <div className="no-print bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-5">
-        <div className="space-y-3">
+      <div className="bg-white border border-slate-200 rounded-xl p-3.5 sm:p-4 space-y-3.5">
+        <div className="space-y-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-semibold text-slate-900">1. 出力範囲の選択</div>
             <div className="inline-flex items-center gap-1 p-1 bg-slate-100 rounded-lg text-xs">
@@ -436,7 +965,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                   key={m}
                   type="button"
                   onClick={() => setScopeMode(m)}
-                  className={`min-h-[36px] px-3 py-1 rounded-md font-medium cursor-pointer ${
+                  className={`min-h-[max(44px,2.75rem)] px-2.5 py-1 rounded-md font-medium cursor-pointer ${
                     scopeMode === m ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
                   }`}
                 >
@@ -447,8 +976,8 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
           </div>
 
           {scopeMode !== 'custom' ? (
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2">
+            <div className="space-y-2.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-xs text-slate-600 mr-1">科目:</span>
                 {state.subjects.map((sub) => {
                   const active = selectedSubjects.includes(sub);
@@ -457,7 +986,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                       key={sub}
                       type="button"
                       onClick={() => toggleSubject(sub)}
-                      className={`min-h-[38px] px-3 py-1 rounded-md border text-xs font-medium cursor-pointer transition-colors ${
+                      className={`min-h-[max(44px,2.75rem)] px-3 py-1 rounded-md border text-xs font-medium cursor-pointer transition-colors ${
                         active
                           ? 'border-blue-900 bg-blue-900 text-white'
                           : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
@@ -475,7 +1004,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                   <select
                     value={selectedFolder}
                     onChange={(e) => setSelectedFolder(e.target.value)}
-                    className="min-h-[40px] rounded-lg border border-slate-300 px-3 py-1.5 text-xs text-slate-900 bg-white"
+                    className="min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-3 py-1.5 text-slate-900 bg-white"
                   >
                     <option value="ALL">選択科目のすべて</option>
                     {availableFolders.map((f) => (
@@ -488,7 +1017,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
               )}
             </div>
           ) : (
-            <div className="border border-slate-200 rounded-lg p-3 space-y-2.5">
+            <div className="border border-slate-200 rounded-lg p-2.5 space-y-2">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-medium text-slate-700 tabular-nums">
                   選択中: {customSelectedIds.length} / {activeItemsPool.length} 件
@@ -510,13 +1039,13 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                   </button>
                 </div>
               </div>
-              <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 border border-slate-100 rounded">
+              <div className="max-h-44 overflow-y-auto divide-y divide-slate-100 border border-slate-100 rounded">
                 {activeItemsPool.map((item) => {
                   const checked = customSelectedIds.includes(item.id);
                   return (
                     <label
                       key={item.id}
-                      className="flex items-center gap-2.5 px-3 py-2 text-xs hover:bg-slate-50 cursor-pointer"
+                      className="flex items-center gap-2 px-2.5 py-1.5 text-xs hover:bg-slate-50 cursor-pointer"
                     >
                       <input
                         type="checkbox"
@@ -528,7 +1057,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                         }
                         className="w-4 h-4 rounded border-slate-300 text-blue-900"
                       />
-                      <span className="font-medium text-slate-900">{item.heading}</span>
+                      <span className="font-medium text-slate-900 truncate">{item.heading}</span>
                       <span className="text-slate-500 ml-auto shrink-0">{item.folder_path}</span>
                     </label>
                   );
@@ -550,12 +1079,12 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
 
         {/* PDF Options */}
         {activeTab === 'pdf' ? (
-          <div className="border-t border-slate-200 pt-4 space-y-4">
+          <div className="border-t border-slate-200 pt-3.5 space-y-3">
             <div className="text-sm font-semibold text-slate-900">
               2. PDFレイアウト・サイズ・詳細オプション（設定は自動保存）
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
               <label className="space-y-1">
                 <span className="text-slate-600 font-medium block">表示モード</span>
                 <select
@@ -563,7 +1092,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                   onChange={(e) =>
                     patchPdf({ displayMode: e.target.value as PdfExportSettings['displayMode'] })
                   }
-                  className="w-full min-h-[40px] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
+                  className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
                 >
                   <option value="normal">通常（見出し＋解説）</option>
                   <option value="redsheet">赤シート（解説が赤字）</option>
@@ -578,7 +1107,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                   onChange={(e) =>
                     patchPdf({ paperSize: e.target.value as PdfExportSettings['paperSize'] })
                   }
-                  className="w-full min-h-[40px] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
+                  className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
                 >
                   <option value="A4">A4</option>
                   <option value="B5">B5</option>
@@ -594,7 +1123,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                   onChange={(e) =>
                     patchPdf({ orientation: e.target.value as PdfExportSettings['orientation'] })
                   }
-                  className="w-full min-h-[40px] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
+                  className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
                 >
                   <option value="portrait">縦</option>
                   <option value="landscape">横</option>
@@ -606,7 +1135,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                 <select
                   value={pdf.columns}
                   onChange={(e) => patchPdf({ columns: Number(e.target.value) as 1 | 2 | 3 })}
-                  className="w-full min-h-[40px] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
+                  className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
                 >
                   <option value={1}>1列</option>
                   <option value={2}>2列</option>
@@ -621,7 +1150,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                   onChange={(e) =>
                     patchPdf({ fontSize: e.target.value as PdfExportSettings['fontSize'] })
                   }
-                  className="w-full min-h-[40px] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
+                  className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
                 >
                   <option value="sm">小（最小8pt対応）</option>
                   <option value="md">標準</option>
@@ -637,7 +1166,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                     const v = e.target.value;
                     patchPdf({ itemsPerPage: v === 'auto' ? 'auto' : Number(v) });
                   }}
-                  className="w-full min-h-[40px] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
+                  className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
                 >
                   <option value="auto">自動</option>
                   <option value="6">6件 / ページ</option>
@@ -655,7 +1184,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                   onChange={(e) =>
                     patchPdf({ sortBy: e.target.value as PdfExportSettings['sortBy'] })
                   }
-                  className="w-full min-h-[40px] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
+                  className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
                 >
                   <option value="folder">フォルダ順</option>
                   <option value="mistakes">ミス回数順</option>
@@ -669,7 +1198,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                   onChange={(e) =>
                     patchPdf({ margin: e.target.value as PdfExportSettings['margin'] })
                   }
-                  className="w-full min-h-[40px] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
+                  className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-2.5 py-1.5 bg-white"
                 >
                   <option value="normal">標準（16mm）</option>
                   <option value="narrow">狭め（8mm）</option>
@@ -677,7 +1206,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
               </label>
             </div>
 
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs pt-1">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs pt-0.5">
               <label className="inline-flex items-center gap-2 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -729,7 +1258,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
             </div>
           </div>
         ) : (
-          <div className="border-t border-slate-200 pt-4 space-y-2 text-xs">
+          <div className="border-t border-slate-200 pt-3.5 space-y-2 text-xs">
             <div className="text-sm font-semibold text-slate-900">2. Anki 取り込み設定</div>
             <label className="block max-w-sm space-y-1">
               <span className="text-slate-600 font-medium block">
@@ -740,7 +1269,7 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
                 value={ankiDeck}
                 onChange={(e) => setAnkiDeck(e.target.value)}
                 placeholder="例: Anarize::弱点復習"
-                className="w-full min-h-[40px] rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-900"
+                className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-3 py-1.5 text-slate-900"
               />
             </label>
           </div>
@@ -749,199 +1278,95 @@ export function ExportView({ state, onStateUpdated }: ExportViewProps) {
 
       {/* Preview Area */}
       {activeTab === 'pdf' ? (
-        <div
-          className="print-only-container rounded-xl border p-6 sm:p-8 space-y-5"
-          style={{
-            backgroundColor: PDF_COLORS.background,
-            borderColor: PDF_COLORS.border,
-            color: PDF_COLORS.text,
-            fontSize: `${printFontPt}pt`,
-          }}
-        >
-          {/* Print Header */}
-          <div
-            className="pb-3 flex flex-wrap items-baseline justify-between gap-3 border-b"
-            style={{ borderColor: PDF_COLORS.primary }}
-          >
-            <div>
-              <h2 className="text-[1.35em] font-bold" style={{ color: PDF_COLORS.primary }}>
-                {APP_NAME} 復習まとめ（
-                {scopeMode === 'custom'
-                  ? '選択項目'
-                  : selectedSubjects.join('・') || '科目未選択'}
-                ）
-              </h2>
-              <div className="text-[0.82em] mt-0.5 tabular-nums" style={{ color: PDF_COLORS.muted }}>
-                出力日: {getTodayJST()} · 知識 {filteredItems.length}件
-                {pdf.includeTendencies ? ` · 傾向 ${filteredTendencies.length}件` : ''}
-              </div>
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+            <div className="text-sm font-semibold text-slate-900">
+              プレビュー
+              {hasAnyContent && pages.length > 0 && (
+                <span className="ml-2 text-xs font-normal text-slate-500 tabular-nums">
+                  全 {pages.length} ページ（{pdf.paperSize}{' '}
+                  {pdf.orientation === 'landscape' ? '横' : '縦'}）
+                </span>
+              )}
             </div>
-            <div className="text-[0.8em] tabular-nums" style={{ color: PDF_COLORS.muted }}>
-              {pdf.paperSize} {pdf.orientation === 'landscape' ? '横' : '縦'} · {pdf.columns}列
-            </div>
+            {isPaginating && (
+              <span className="text-xs text-slate-500">ページ割り付けを更新中...</span>
+            )}
           </div>
 
-          {filteredItems.length === 0 && filteredTendencies.length === 0 ? (
-            <p className="text-sm py-8 text-center" style={{ color: PDF_COLORS.muted }}>
-              選択された条件に該当する出力データがありません。
-            </p>
+          {!hasAnyContent ? (
+            <div className="bg-white border border-slate-200 rounded-xl p-8 text-center text-sm text-slate-500">
+              出力する項目を選んでください
+            </div>
           ) : (
-            <>
-              {/* Optional Table of Contents */}
-              {pdf.includeToc && groupedByFolder.length > 0 && (
-                <section
-                  className="p-3 rounded-md border space-y-1.5"
-                  style={{
-                    borderColor: PDF_COLORS.border,
-                    backgroundColor: PDF_COLORS.bandBg,
-                  }}
-                >
-                  <div className="font-bold text-[0.95em]" style={{ color: PDF_COLORS.primary }}>
-                    目次（収録単元）
-                  </div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[0.85em] tabular-nums">
-                    {groupedByFolder.map(([folderPath, items]) => (
-                      <span key={folderPath}>
-                        {folderPath}（{items.length}件）
-                      </span>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {/* Knowledge Items */}
-              {filteredItems.length > 0 && (
-                <>
-                  {pdf.itemsPerPage === 'auto' && pdf.sortBy === 'folder' ? (
-                    <div className="space-y-4">
-                      {groupedByFolder.map(([folderPath, items], idx) => (
-                        <section
-                          key={folderPath}
-                          className={`space-y-2 ${
-                            pdf.pageBreakPerUnit && idx > 0 ? 'print-page-break' : ''
-                          }`}
-                        >
-                          <h3
-                            className="font-bold px-2.5 py-1 rounded text-[0.95em]"
-                            style={{
-                              backgroundColor: PDF_COLORS.bandBg,
-                              color: PDF_COLORS.primary,
-                            }}
-                          >
-                            {folderPath}
-                          </h3>
-                          <div className={`grid gap-2 ${gridColsClass}`}>
-                            {items.map((item) => renderKnowledgeCard(item, false))}
-                          </div>
-                        </section>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      {pagedItems.map((pageSlice, pageIdx) => (
-                        <div
-                          key={pageIdx}
-                          className={`grid gap-2 ${gridColsClass} ${
-                            pageIdx > 0 ? 'print-page-break' : ''
-                          }`}
-                        >
-                          {pageSlice.map((item) => renderKnowledgeCard(item, true))}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-
-              {/* Dedicated Tendencies Page */}
-              {pdf.includeTendencies && filteredTendencies.length > 0 && (
-                <section
-                  className={`space-y-3 pt-2 ${
-                    filteredItems.length > 0 ? 'print-page-break' : ''
-                  }`}
-                >
-                  <h3
-                    className="font-bold px-2.5 py-1.5 rounded text-[1.05em]"
-                    style={{
-                      backgroundColor: PDF_COLORS.bandBg,
-                      color: PDF_COLORS.primary,
-                    }}
-                  >
-                    注意すべきミスの傾向
-                  </h3>
-                  <div className="divide-y rounded-md border" style={{ borderColor: PDF_COLORS.border }}>
-                    {filteredTendencies.map((t) => (
-                      <div key={t.tendency_id} className="p-2.5 space-y-1 break-inside-avoid">
-                        <div className="flex flex-wrap items-baseline justify-between gap-2">
-                          <span className="font-semibold">
-                            {t.name}
-                            {t.hidden ? '（非表示）' : ''}
-                          </span>
-                          <span className="text-[0.85em] tabular-nums" style={{ color: PDF_COLORS.muted }}>
-                            {t.category} · {t.subjects.join('/')} · 計{t.occurrences.length}回
-                          </span>
-                        </div>
-                        {t.occurrences[0] && (
-                          <div className="text-[0.85em]" style={{ color: PDF_COLORS.muted }}>
-                            直近例 ({t.occurrences[0].date} {t.occurrences[0].subject}/
-                            {t.occurrences[0].unit}): {t.occurrences[0].situation}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-            </>
+            <div className="bg-slate-100/80 border border-slate-200 rounded-xl p-3 sm:p-5">
+              <div
+                ref={previewContainerRef}
+                className="w-full max-w-3xl mx-auto space-y-5"
+              >
+                {pages.map((page) => (
+                  <LazyPreviewPage
+                    key={`${page.pageNumber}-${pdf.paperSize}-${pdf.orientation}-${pdf.columns}-${pdf.fontSize}-${pdf.margin}-${pdf.displayMode}`}
+                    page={page}
+                    totalPages={pages.length}
+                    headerTitle={pdfHeaderTitle}
+                    headerMetaText={pdfHeaderMetaText}
+                    settings={pdf}
+                    dimensions={dimensions}
+                    scale={previewScale}
+                  />
+                ))}
+              </div>
+            </div>
           )}
-        </div>
+        </section>
       ) : (
-        <div className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-4">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 sm:p-4 space-y-3">
           <div className="space-y-1">
             <h3 className="text-sm font-semibold text-slate-900">Anki用テキストプレビュー</h3>
-            <p className="text-xs text-slate-500 leading-relaxed">
+            <p className="text-xs text-slate-500 leading-snug">
               先頭行に{' '}
               <code className="bg-slate-100 px-1 rounded">#separator:tab</code> /{' '}
               <code className="bg-slate-100 px-1 rounded">#html:true</code> /{' '}
               <code className="bg-slate-100 px-1 rounded">#guid column:1</code> /{' '}
               <code className="bg-slate-100 px-1 rounded">#tags column:4</code> /{' '}
               <code className="bg-slate-100 px-1 rounded">#deck column:5</code>{' '}
-              を付与し、改行は <code className="bg-slate-100 px-1 rounded">&lt;br&gt;</code>、HTML特殊文字をエスケープして出力します。Anki 側の「ファイルを読み込む」でそのままインポートできます。
+              を付与し、改行は <code className="bg-slate-100 px-1 rounded">&lt;br&gt;</code>、HTML特殊文字をエスケープして出力します。
             </p>
           </div>
 
           {ankiRows.length === 0 ? (
-            <p className="text-sm text-slate-500 py-8 text-center">
-              出力対象の知識項目がありません。
+            <p className="text-sm text-slate-500 py-6 text-center">
+              出力する項目を選んでください
             </p>
           ) : (
             <div className="overflow-x-auto border border-slate-200 rounded-lg">
               <table className="w-full text-left text-xs border-collapse">
                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
                   <tr>
-                    <th className="py-2.5 px-3 font-semibold">1: GUID</th>
-                    <th className="py-2.5 px-3 font-semibold">2: 見出し</th>
-                    <th className="py-2.5 px-3 font-semibold">3: 解説（HTML/MathJax）</th>
-                    <th className="py-2.5 px-3 font-semibold">4: タグ</th>
-                    <th className="py-2.5 px-3 font-semibold">5: デッキ</th>
+                    <th className="py-2 px-2.5 font-semibold">1: GUID</th>
+                    <th className="py-2 px-2.5 font-semibold">2: 見出し</th>
+                    <th className="py-2 px-2.5 font-semibold">3: 解説（HTML/MathJax）</th>
+                    <th className="py-2 px-2.5 font-semibold">4: タグ</th>
+                    <th className="py-2 px-2.5 font-semibold">5: デッキ</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {ankiRows.slice(0, 50).map((row) => (
+                  {ankiRows.map((row) => (
                     <tr key={row.guid} className="align-top">
-                      <td className="py-2 px-3 text-slate-500 font-mono text-[11px] whitespace-nowrap">
+                      <td className="py-1.5 px-2.5 text-slate-500 font-mono text-xs whitespace-nowrap">
                         {row.guid}
                       </td>
-                      <td className="py-2 px-3 font-medium text-slate-900 whitespace-nowrap">
+                      <td className="py-1.5 px-2.5 font-medium text-slate-900 whitespace-nowrap">
                         {row.heading}
                       </td>
-                      <td className="py-2 px-3 text-slate-700 max-w-md break-words font-mono text-[11px]">
+                      <td className="py-1.5 px-2.5 text-slate-700 max-w-md break-words font-mono text-xs">
                         {row.explanation}
                       </td>
-                      <td className="py-2 px-3 text-slate-600 font-mono text-[11px] whitespace-nowrap">
+                      <td className="py-1.5 px-2.5 text-slate-600 font-mono text-xs whitespace-nowrap">
                         {row.tags}
                       </td>
-                      <td className="py-2 px-3 text-slate-500 text-[11px] whitespace-nowrap">
+                      <td className="py-1.5 px-2.5 text-slate-500 text-xs whitespace-nowrap">
                         {row.deck || '—'}
                       </td>
                     </tr>

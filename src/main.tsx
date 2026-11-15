@@ -2,7 +2,10 @@ import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { applyFontScale, getFontScale } from './services/storeService.ts';
 import { clearAppCachesAndReload } from './utils/cacheRecovery.ts';
+
+applyFontScale(getFontScale());
 
 // Recover automatically if a stale HTML references an outdated chunk hash
 window.addEventListener('vite:preloadError', (event) => {
@@ -36,15 +39,15 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryS
             <p className="text-xs text-slate-600 leading-relaxed">
               古いキャッシュが残っている可能性があります。下のボタンからキャッシュを消去して最新版を再読み込みしてください（学習データやAPIキーは保持されます）。
             </p>
-            <div className="bg-slate-100 rounded-lg p-3 text-[11px] font-mono text-slate-700 break-all">
+            <div className="bg-slate-100 rounded-lg p-3 text-xs font-mono text-slate-700 break-all">
               {this.state.error.message}
             </div>
             <button
               type="button"
               onClick={() => void clearAppCachesAndReload()}
-              className="w-full min-h-[44px] px-4 py-2.5 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 cursor-pointer"
+              className="w-full min-h-[max(44px,2.75rem)] px-4 py-2.5 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 cursor-pointer"
             >
-              キャッシュを最新にして再読み込み
+              キャッシュを削除して最新版を読み込む
             </button>
           </div>
         </div>

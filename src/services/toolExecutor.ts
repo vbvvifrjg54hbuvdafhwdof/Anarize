@@ -217,13 +217,6 @@ function executeCreateFolder(state: AppState, folderPath: string): { ok: boolean
   if (parts.length > 3) {
     return { ok: false, code: 'DEPTH_EXCEEDED', message: '階層は科目の下に最大2段までです。' };
   }
-  if (parts[parts.length - 1].length > state.limits.maxHeadingLength) {
-    return {
-      ok: false,
-      code: 'VALIDATION_ERROR',
-      message: `フォルダ名は${state.limits.maxHeadingLength}文字以内にしてください。`,
-    };
-  }
   if (state.folders.includes(norm)) {
     return { ok: false, code: 'ALREADY_EXISTS', message: `フォルダ「${norm}」は既に存在します。` };
   }
@@ -325,13 +318,6 @@ function executeRenameItem(
   }
   if (!cleanNew || cleanNew.includes('/')) {
     return { ok: false, code: 'VALIDATION_ERROR', message: '新しい名前が不正です（空や「/」は不可）。' };
-  }
-  if (cleanNew.length > state.limits.maxHeadingLength) {
-    return {
-      ok: false,
-      code: 'VALIDATION_ERROR',
-      message: `新しい名前は${state.limits.maxHeadingLength}文字以内にしてください。`,
-    };
   }
   if (containsSuspectedPII(cleanNew)) {
     return { ok: false, code: 'PII_SUSPECTED', message: '個人情報らしき文字列が含まれています。修正してください。' };
@@ -479,8 +465,7 @@ export async function resolveProposal(
 export async function executeAITool(
   toolName: string,
   rawArgs: Record<string, unknown>,
-  tracker: ReviewSessionTracker,
-  forceAllowNoteTruncate = false
+  tracker: ReviewSessionTracker
 ): Promise<Record<string, unknown>> {
   const state = await loadState();
 
@@ -510,8 +495,7 @@ export async function executeAITool(
         .filter((i) => !i.hidden && i.folder_path === folderPath)
         .sort((a, b) => b.mistake_count - a.mistake_count);
 
-      const truncated = matchingItems.length > 50;
-      const items = matchingItems.slice(0, 50).map((i) => ({
+      const items = matchingItems.map((i) => ({
         heading: i.heading,
         mistake_count: i.mistake_count,
       }));
@@ -520,7 +504,6 @@ export async function executeAITool(
         folder_path: folderPath,
         folders: directFolders,
         items,
-        truncated,
       };
     }
 
@@ -549,15 +532,6 @@ export async function executeAITool(
     }
 
     case 'save_file': {
-      if (tracker.savedCount >= state.limits.maxSavePerReview) {
-        return makeError(
-          tracker,
-          toolName,
-          rawArgs,
-          'LIMIT_EXCEEDED',
-          `1回の添削で登録できる知識項目は最大${state.limits.maxSavePerReview}件までです。`
-        );
-      }
       const folderPath = normalizePath(String(rawArgs.folder_path ?? ''));
       const heading = String(rawArgs.heading ?? '').trim();
       const explanation = String(rawArgs.explanation ?? '').trim();
@@ -581,23 +555,8 @@ export async function executeAITool(
       if (!heading || heading.includes('/')) {
         return makeError(tracker, toolName, rawArgs, 'VALIDATION_ERROR', '見出しが空または不正です。');
       }
-      if (heading.length > state.limits.maxHeadingLength) {
-        return makeError(
-          tracker,
-          toolName,
-          rawArgs,
-          'VALIDATION_ERROR',
-          `見出しは${state.limits.maxHeadingLength}文字以内にしてください。`
-        );
-      }
-      if (!explanation || explanation.length > state.limits.maxExplanationLength) {
-        return makeError(
-          tracker,
-          toolName,
-          rawArgs,
-          'VALIDATION_ERROR',
-          `解説は1〜${state.limits.maxExplanationLength}文字以内にしてください。`
-        );
+      if (!explanation) {
+        return makeError(tracker, toolName, rawArgs, 'VALIDATION_ERROR', '解説が空です。');
       }
       if (containsSuspectedPII(heading) || containsSuspectedPII(explanation)) {
         return makeError(
@@ -696,17 +655,7 @@ export async function executeAITool(
     case 'move_item': {
       const fromPath = normalizePath(String(rawArgs.from_path ?? ''));
       const toFolderPath = normalizePath(String(rawArgs.to_folder_path ?? ''));
-      const reason = String(rawArgs.reason ?? '').trim();
-
-      if (!reason || reason.length > state.limits.maxReasonLength) {
-        return makeError(
-          tracker,
-          toolName,
-          rawArgs,
-          'VALIDATION_ERROR',
-          `移動の理由は1〜${state.limits.maxReasonLength}文字以内にしてください。`
-        );
-      }
+      const reason = String(rawArgs.reason ?? '').trim() || '整理のため';
 
       const testState: AppState = JSON.parse(JSON.stringify(state));
       const check = executeMoveItem(testState, fromPath, toFolderPath);
@@ -744,17 +693,7 @@ export async function executeAITool(
     case 'rename_item': {
       const targetPath = normalizePath(String(rawArgs.path ?? ''));
       const newName = String(rawArgs.new_name ?? '').trim();
-      const reason = String(rawArgs.reason ?? '').trim();
-
-      if (!reason || reason.length > state.limits.maxReasonLength) {
-        return makeError(
-          tracker,
-          toolName,
-          rawArgs,
-          'VALIDATION_ERROR',
-          `変更の理由は1〜${state.limits.maxReasonLength}文字以内にしてください。`
-        );
-      }
+      const reason = String(rawArgs.reason ?? '').trim() || '整理のため';
 
       const testState: AppState = JSON.parse(JSON.stringify(state));
       const check = executeRenameItem(testState, targetPath, newName);
@@ -792,17 +731,7 @@ export async function executeAITool(
     case 'merge_items': {
       const fromPath = normalizePath(String(rawArgs.from_path ?? ''));
       const intoPath = normalizePath(String(rawArgs.into_path ?? ''));
-      const reason = String(rawArgs.reason ?? '').trim();
-
-      if (!reason || reason.length > state.limits.maxReasonLength) {
-        return makeError(
-          tracker,
-          toolName,
-          rawArgs,
-          'VALIDATION_ERROR',
-          `統合の理由は1〜${state.limits.maxReasonLength}文字以内にしてください。`
-        );
-      }
+      const reason = String(rawArgs.reason ?? '').trim() || '整理のため';
 
       const testState: AppState = JSON.parse(JSON.stringify(state));
       const check = executeMergeItems(testState, fromPath, intoPath);
@@ -868,22 +797,12 @@ export async function executeAITool(
           };
         })
         .sort((a, b) => b.latestDate.localeCompare(a.latestDate))
-        .slice(0, 30)
         .map((entry) => entry.payload);
 
       return { tendencies: filtered };
     }
 
     case 'record_tendency': {
-      if (tracker.tendencyCount >= state.limits.maxTendencyPerReview) {
-        return makeError(
-          tracker,
-          toolName,
-          rawArgs,
-          'LIMIT_EXCEEDED',
-          `1回の添削で記録できる傾向は最大${state.limits.maxTendencyPerReview}件までです。`
-        );
-      }
       const tendencyId = rawArgs.tendency_id ? String(rawArgs.tendency_id).trim() : undefined;
       const newName = rawArgs.new_name ? String(rawArgs.new_name).trim() : undefined;
       const category = rawArgs.category ? (String(rawArgs.category).trim() as TendencyCategory) : undefined;
@@ -897,14 +816,8 @@ export async function executeAITool(
       if (!unit) {
         return makeError(tracker, toolName, rawArgs, 'VALIDATION_ERROR', '単元（unit）を指定してください。');
       }
-      if (!situation || situation.length > state.limits.maxSituationLength) {
-        return makeError(
-          tracker,
-          toolName,
-          rawArgs,
-          'VALIDATION_ERROR',
-          `situationは1〜${state.limits.maxSituationLength}文字以内にしてください。`
-        );
+      if (!situation) {
+        return makeError(tracker, toolName, rawArgs, 'VALIDATION_ERROR', 'situationが空です。');
       }
       if (containsSuspectedPII(situation) || (newName && containsSuspectedPII(newName))) {
         return makeError(
@@ -952,14 +865,8 @@ export async function executeAITool(
         };
       }
 
-      if (!newName || newName.length > state.limits.maxTendencyNameLength) {
-        return makeError(
-          tracker,
-          toolName,
-          rawArgs,
-          'VALIDATION_ERROR',
-          `傾向名は1〜${state.limits.maxTendencyNameLength}文字以内にしてください。`
-        );
+      if (!newName) {
+        return makeError(tracker, toolName, rawArgs, 'VALIDATION_ERROR', '傾向名が空です。');
       }
 
       const similar = findSimilarTendency(state.tendencies, newName);
@@ -1023,24 +930,10 @@ export async function executeAITool(
       const confidenceLow = Boolean(rawArgs.confidence_low);
       const rawQuestions = Array.isArray(rawArgs.questions) ? rawArgs.questions : [];
       const pastRelation = rawArgs.past_relation ? String(rawArgs.past_relation).trim() : undefined;
-      let note = rawArgs.note ? String(rawArgs.note).trim() : undefined;
+      const note = rawArgs.note ? String(rawArgs.note).trim() : undefined;
 
       if (!state.subjects.includes(subject)) {
         return makeError(tracker, toolName, rawArgs, 'SUBJECT_NOT_FOUND', `科目「${subject}」は存在しません。`);
-      }
-
-      if (note && note.length > state.limits.maxNoteLength) {
-        if (forceAllowNoteTruncate) {
-          note = note.slice(0, state.limits.maxNoteLength);
-        } else {
-          return makeError(
-            tracker,
-            toolName,
-            rawArgs,
-            'VALIDATION_ERROR',
-            `ひとこと（note）は${state.limits.maxNoteLength}文字以内にしてください（現在${note.length}文字）。`
-          );
-        }
       }
 
       const questions: ReviewQuestion[] = rawQuestions.map((q) => {

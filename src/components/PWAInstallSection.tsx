@@ -45,7 +45,7 @@ export function PWAInstallSection() {
           <button
             type="button"
             onClick={() => void handleInstallClick()}
-            className="w-full sm:w-auto min-h-[44px] inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 transition-colors cursor-pointer"
+            className="w-full sm:w-auto min-h-[max(44px,2.75rem)] inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 transition-colors cursor-pointer"
           >
             <Download className="w-4 h-4" />
             <span>アプリとしてインストール</span>
@@ -70,7 +70,7 @@ export function PWAInstallSection() {
               </svg>
               <div>
                 <div className="font-semibold text-slate-900">1. 共有ボタン（□↑）</div>
-                <div className="text-[11px] text-slate-500">画面下部または上部の共有アイコンをタップ</div>
+                <div className="text-xs text-slate-500">画面下部または上部の共有アイコンをタップ</div>
               </div>
             </div>
             <div className="flex items-center gap-2.5 bg-slate-50 border border-slate-200 rounded-md p-2.5">
@@ -84,7 +84,7 @@ export function PWAInstallSection() {
               </svg>
               <div>
                 <div className="font-semibold text-slate-900">2.「ホーム画面に追加」</div>
-                <div className="text-[11px] text-slate-500">一覧から選び、右上の「追加」をタップ</div>
+                <div className="text-xs text-slate-500">一覧から選び、右上の「追加」をタップ</div>
               </div>
             </div>
           </div>
@@ -98,7 +98,7 @@ export function PWAInstallSection() {
       )}
 
       {!isIOS && !canInstallPrompt && (
-        <div className="text-[11px] text-slate-500 leading-relaxed">
+        <div className="text-xs text-slate-500 leading-relaxed">
           Chrome・Edge では、アドレスバー右端のインストールアイコンまたはブラウザメニュー（⋮）の「アプリをインストール」「ホーム画面に追加」からも追加できます。
         </div>
       )}

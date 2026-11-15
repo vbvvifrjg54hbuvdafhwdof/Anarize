@@ -4,11 +4,25 @@ import path from 'path';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+function formatBuildVersion(): string {
+  const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  const yyyy = jst.getUTCFullYear();
+  const mm = String(jst.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(jst.getUTCDate()).padStart(2, '0');
+  const hh = String(jst.getUTCHours()).padStart(2, '0');
+  const min = String(jst.getUTCMinutes()).padStart(2, '0');
+  const sha = (process.env.GITHUB_SHA || 'local').slice(0, 7);
+  return `${yyyy}/${mm}/${dd} ${hh}:${min} (${sha})`;
+}
+
 export default defineConfig(({ command }) => {
   const base = command === 'serve' ? '/' : process.env.BASE_PATH || '/anarize/';
 
   return {
     base,
+    define: {
+      __APP_BUILD_VERSION__: JSON.stringify(formatBuildVersion()),
+    },
     plugins: [
       react(),
       tailwindcss(),

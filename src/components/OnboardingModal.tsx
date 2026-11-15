@@ -97,9 +97,9 @@ export function OnboardingModal({
       aria-modal="true"
       aria-label={`${APP_NAME} 初回セットアップガイド`}
     >
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-2xl max-h-[92vh] overflow-y-auto p-5 sm:p-6 space-y-5">
-        <div className="space-y-1 border-b border-slate-200 pb-4">
-          <h2 className="text-lg sm:text-xl font-bold text-slate-900">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-2xl max-h-[92vh] overflow-y-auto p-3.5 sm:p-5 space-y-3.5">
+        <div className="space-y-0.5 border-b border-slate-200 pb-3">
+          <h2 className="text-base sm:text-lg font-bold text-slate-900">
             {APP_FULL_NAME} へようこそ
           </h2>
           <p className="text-xs text-slate-500">
@@ -119,9 +119,9 @@ export function OnboardingModal({
         </section>
 
         {/* 2. Mandatory Google Data Transmission Consent & Age Notice */}
-        <section className="bg-amber-50 border border-amber-200 rounded-lg p-4 space-y-3">
-          <div className="flex items-start gap-2.5">
-            <ShieldAlert className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+        <section className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
+          <div className="flex items-start gap-2">
+            <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
             <div className="space-y-1.5">
               <div className="text-sm font-semibold text-amber-950">
                 2. 答案データの送信・年齢条件に関する同意（必須）
@@ -166,8 +166,8 @@ export function OnboardingModal({
             <span>3. Gemini APIキーの準備と入力</span>
           </div>
 
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-2.5 text-xs text-slate-700">
-            <ol className="space-y-1.5 pl-4 list-decimal leading-relaxed">
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2 text-xs text-slate-700">
+            <ol className="space-y-1 pl-4 list-decimal leading-snug">
               <li>
                 <a
                   href="https://aistudio.google.com/apikey"
@@ -184,20 +184,20 @@ export function OnboardingModal({
               <li>発行されたキー文字列をコピーします（画面のスクリーンショットやSNS等で他人に共有しないでください）。</li>
               <li>下の入力欄に貼り付け、「接続テスト」で成功を確認してから開始します。</li>
             </ol>
-            <p className="text-[11px] text-slate-500">
+            <p className="text-xs text-slate-500">
               ※ Google AI Studio の画面名や手順は変更されることがあります。無料枠には1分・1日あたりの回数上限があります。
             </p>
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <div className="relative flex-1 min-w-[210px]">
+            <div className="relative flex-1 min-w-[13rem]">
               <input
                 type={showKey ? 'text' : 'password'}
                 value={apiKeyInput}
                 onChange={(e) => setApiKeyInput(e.target.value)}
                 placeholder="AIza...（あとから設定画面でも登録できます）"
                 autoComplete="off"
-                className="w-full min-h-[44px] rounded-lg border border-slate-300 pl-3 pr-11 py-2 text-sm font-mono text-slate-900"
+                className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 pl-3 pr-11 py-2 text-sm font-mono text-slate-900"
               />
               <button
                 type="button"
@@ -212,7 +212,7 @@ export function OnboardingModal({
               type="button"
               disabled={testingKey || !apiKeyInput.trim()}
               onClick={() => void handleTestKey()}
-              className="min-h-[44px] inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg border border-blue-900 text-blue-900 text-xs font-semibold hover:bg-blue-50 disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg border border-blue-900 text-blue-900 text-xs font-semibold hover:bg-blue-50 disabled:opacity-40 cursor-pointer whitespace-nowrap shrink-0"
             >
               {testingKey ? (
                 <>
@@ -248,7 +248,7 @@ export function OnboardingModal({
             type="button"
             disabled={!canProceed || busy}
             onClick={() => void handleContinueWithoutKey()}
-            className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-300 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+            className="min-h-[max(44px,2.75rem)] px-4 py-2 rounded-lg border border-slate-300 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
           >
             あとでキーを設定する（閲覧・復元へ）
           </button>
@@ -256,7 +256,7 @@ export function OnboardingModal({
             type="button"
             disabled={!canProceed || busy || !apiKeyInput.trim()}
             onClick={() => void handleSaveAndStart()}
-            className="min-h-[44px] inline-flex items-center gap-1.5 px-5 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 disabled:bg-slate-300 disabled:cursor-not-allowed cursor-pointer"
+            className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-5 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 disabled:bg-slate-300 disabled:cursor-not-allowed cursor-pointer"
           >
             <CheckCircle2 className="w-4 h-4" />
             <span>キーを保存して始める</span>

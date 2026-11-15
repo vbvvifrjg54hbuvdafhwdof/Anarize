@@ -10,7 +10,7 @@ import {
   Sparkles,
   WifiOff,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRegisterSW } from 'virtual:pwa-register/react';
 import { ExportView } from './components/ExportView.tsx';
 import { GradingDesk } from './components/GradingDesk.tsx';
@@ -26,8 +26,10 @@ import {
   acceptConsent,
   dismissInstallGuide,
   getApiKey,
+  getFontScale,
   loadState,
   requestStoragePersistence,
+  setFontScale as persistFontScale,
   setMode,
   toggleTendencyHidden,
 } from './services/storeService.ts';
@@ -58,8 +60,50 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => parseTabFromHash());
   const [showSettings, setShowSettings] = useState(false);
+  const [fontScale, setFontScaleState] = useState<number>(() => getFontScale());
   const [hasApiKey, setHasApiKey] = useState<boolean>(() => Boolean(getApiKey()));
   const [keyGuideSkippedForSession, setKeyGuideSkippedForSession] = useState(false);
+
+  // Busy tracking for safe automatic PWA updates
+  const [gradingBusy, setGradingBusy] = useState(false);
+  const [notebookBusy, setNotebookBusy] = useState(false);
+  const [isFormFocused, setIsFormFocused] = useState(false);
+  const [hasPendingUpdate, setHasPendingUpdate] = useState(false);
+
+  const isAppBusy = gradingBusy || notebookBusy || isFormFocused || showSettings;
+  const isAppBusyRef = useRef(isAppBusy);
+  isAppBusyRef.current = isAppBusy;
+
+  useEffect(() => {
+    const checkFocus = () => {
+      const active = document.activeElement;
+      if (!active) {
+        setIsFormFocused(false);
+        return;
+      }
+      const tag = active.tagName;
+      if (tag === 'TEXTAREA' || tag === 'SELECT') {
+        setIsFormFocused(true);
+        return;
+      }
+      if (tag === 'INPUT') {
+        const type = (active as HTMLInputElement).type;
+        setIsFormFocused(type !== 'checkbox' && type !== 'radio' && type !== 'file');
+        return;
+      }
+      setIsFormFocused(false);
+    };
+    document.addEventListener('focusin', checkFocus);
+    document.addEventListener('focusout', () => setTimeout(checkFocus, 0));
+    return () => {
+      document.removeEventListener('focusin', checkFocus);
+    };
+  }, []);
+
+  const handleFontScaleChange = useCallback((scale: number) => {
+    const applied = persistFontScale(scale);
+    setFontScaleState(applied);
+  }, []);
 
   // PC 3-pane shared folder selection
   const [paneSubject, setPaneSubject] = useState<string>('');
@@ -75,11 +119,16 @@ export default function App() {
   const [swRegistration, setSwRegistration] = useState<ServiceWorkerRegistration | undefined>(
     undefined
   );
-  const {
-    needRefresh: [needRefresh],
-    updateServiceWorker,
-  } = useRegisterSW({
+
+  useRegisterSW({
     immediate: true,
+    onNeedReload() {
+      if (!isAppBusyRef.current) {
+        window.location.reload();
+      } else {
+        setHasPendingUpdate(true);
+      }
+    },
     onRegisteredSW(_swUrl, registration) {
       if (registration) {
         setSwRegistration(registration);
@@ -88,6 +137,14 @@ export default function App() {
     },
   });
 
+  // Automatically apply deferred PWA update once user is no longer busy
+  useEffect(() => {
+    if (hasPendingUpdate && !isAppBusy) {
+      window.location.reload();
+    }
+  }, [hasPendingUpdate, isAppBusy]);
+
+  // Check for Service Worker updates when tab becomes visible
   useEffect(() => {
     if (!swRegistration) return;
     const checkUpdate = () => {
@@ -212,24 +269,24 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col">
-      {/* PWA Update Banner */}
-      {needRefresh && (
-        <div className="no-print bg-blue-900 text-white px-4 py-2 text-xs flex flex-wrap items-center justify-center gap-3">
-          <span>新しいバージョンの {APP_NAME} が利用可能です。</span>
+      {/* Deferred PWA Update Banner (shown when busy during update detection) */}
+      {hasPendingUpdate && (
+        <div className="bg-blue-900 text-white px-3 py-1.5 text-xs flex flex-wrap items-center justify-center gap-2.5">
+          <span>新しい版があります（作業完了後に自動更新されます）</span>
           <button
             type="button"
-            onClick={() => void updateServiceWorker(true)}
-            className="min-h-[36px] inline-flex items-center gap-1.5 px-3 py-1 rounded bg-white text-blue-950 font-semibold hover:bg-blue-50 cursor-pointer"
+            onClick={() => window.location.reload()}
+            className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-3 py-1 rounded bg-white text-blue-950 font-semibold hover:bg-blue-50 cursor-pointer"
           >
             <RefreshCw className="w-3.5 h-3.5" />
-            <span>更新する</span>
+            <span>今すぐ更新</span>
           </button>
         </div>
       )}
 
       {/* Offline Banner */}
       {!isOnline && (
-        <div className="no-print bg-slate-800 text-slate-100 px-4 py-2 text-xs flex items-center justify-center gap-2">
+        <div className="bg-slate-800 text-slate-100 px-3 py-1.5 text-xs flex items-center justify-center gap-2">
           <WifiOff className="w-3.5 h-3.5 shrink-0" />
           <span>
             オフラインです — 過去のノート・傾向・履歴の閲覧やPDF/Anki出力は利用できます（答案の添削には接続が必要です）
@@ -238,21 +295,21 @@ export default function App() {
       )}
 
       {/* Header */}
-      <header className="no-print bg-white border-b border-slate-200 safe-top sticky top-0 z-30">
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-4">
+      <header className="bg-white border-b border-slate-200 safe-top sticky top-0 z-30">
+        <div className="max-w-7xl mx-auto px-3 sm:px-5 h-12 sm:h-14 flex items-center justify-between gap-3">
           <button
             type="button"
             onClick={() => navigateTo('grade')}
-            className="min-h-[44px] inline-flex items-center gap-2 text-lg font-bold tracking-tight text-blue-950 whitespace-nowrap shrink-0 cursor-pointer"
+            className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-2 text-base font-bold tracking-tight text-blue-950 whitespace-nowrap shrink-0 cursor-pointer"
           >
-            <span className="w-7 h-7 rounded-md bg-blue-900 text-white text-sm font-bold flex items-center justify-center">
+            <span className="w-6 h-6 rounded-md bg-blue-900 text-white text-xs font-bold flex items-center justify-center">
               A
             </span>
             <span>{APP_NAME}</span>
           </button>
 
           {/* Desktop Navigation (>= lg) */}
-          <nav className="hidden lg:flex items-center gap-6 text-sm font-medium">
+          <nav className="hidden lg:flex items-center gap-5 text-sm font-medium">
             {(
               [
                 ['grade', '添削する'],
@@ -272,7 +329,7 @@ export default function App() {
                   key={tabKey}
                   type="button"
                   onClick={() => navigateTo(tabKey)}
-                  className={`py-5 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`py-4 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     active
                       ? 'border-blue-900 text-blue-950 font-semibold'
                       : 'border-transparent text-slate-600 hover:text-slate-900 hover:border-slate-300'
@@ -290,7 +347,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => navigateTo('proposals')}
-                className="lg:hidden min-h-[44px] px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs font-semibold whitespace-nowrap cursor-pointer"
+                className="lg:hidden min-h-[max(44px,2.75rem)] px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs font-semibold whitespace-nowrap cursor-pointer"
               >
                 提案 {pendingProposalsCount}件
               </button>
@@ -298,9 +355,9 @@ export default function App() {
             <button
               type="button"
               onClick={() => setShowSettings(true)}
-              className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <Settings className="w-4 h-4" />
+              <Settings className="w-3.5 h-3.5" />
               <span>設定</span>
             </button>
           </div>
@@ -308,14 +365,14 @@ export default function App() {
       </header>
 
       {/* Main Workspace */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 pb-24 lg:pb-8 space-y-5">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-2.5 sm:px-5 py-3 sm:py-4 pb-20 lg:pb-6 space-y-3.5">
         {loadError && (
-          <div className="no-print bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-800 flex items-center justify-between gap-4">
+          <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs text-red-800 flex items-center justify-between gap-3">
             <span>{loadError}</span>
             <button
               type="button"
               onClick={() => void refreshState()}
-              className="min-h-[44px] px-3 py-1.5 rounded-lg bg-white border border-red-300 text-xs font-medium text-red-800 hover:bg-red-100 cursor-pointer"
+              className="min-h-[max(44px,2.75rem)] px-3 py-1.5 rounded-lg bg-white border border-red-300 text-xs font-medium text-red-800 hover:bg-red-100 cursor-pointer"
             >
               再読み込み
             </button>
@@ -323,7 +380,7 @@ export default function App() {
         )}
 
         {!state && !loadError && (
-          <div className="bg-white border border-slate-200 rounded-xl p-10 text-center text-sm text-slate-500">
+          <div className="bg-white border border-slate-200 rounded-xl p-6 text-center text-sm text-slate-500">
             ワークスペースを読み込んでいます...
           </div>
         )}
@@ -331,16 +388,16 @@ export default function App() {
         {state && (
           <>
             {/* Workspace Status & Mode Bar */}
-            <div className="no-print bg-white border border-slate-200 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-600">
+            <div className="bg-white border border-slate-200 rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
                 <span className="font-medium text-slate-800">整理モード:</span>
-                <div className="inline-flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
+                <div className="inline-flex items-center gap-1 p-0.5 bg-slate-100 rounded-lg">
                   {(['確認', '一任'] as const).map((m) => (
                     <button
                       key={m}
                       type="button"
                       onClick={() => void handleModeSwitch(m)}
-                      className={`min-h-[34px] px-3 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                      className={`min-h-[max(44px,2.75rem)] px-3 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                         state.mode === m
                           ? 'bg-white text-slate-900 shadow-sm'
                           : 'text-slate-600 hover:text-slate-900'
@@ -357,7 +414,7 @@ export default function App() {
                 </span>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 tabular-nums">
+              <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-500 tabular-nums">
                 <span>
                   知識 {state.items.filter((i) => !i.hidden).length} · 傾向{' '}
                   {state.tendencies.filter((t) => !t.hidden).length} · 履歴{' '}
@@ -383,99 +440,107 @@ export default function App() {
 
             {/* PC 3-Pane Layout for Primary Views (grade / knowledge) */}
             {isThreePaneDesktopTab ? (
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
                 {/* Left Pane (PC only): Subject & Folder Tree */}
-                <aside className="hidden lg:block lg:col-span-3 bg-white border border-slate-200 rounded-xl p-4 space-y-3 sticky top-20 max-h-[calc(100vh-7rem)] overflow-y-auto">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                <aside className="hidden lg:block lg:col-span-3 bg-white border border-slate-200 rounded-xl p-3 space-y-2.5 sticky top-16 max-h-[calc(100vh-5.5rem)] overflow-y-auto">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
                     <span className="text-xs font-semibold text-slate-700">科目・単元フォルダ</span>
                     <button
                       type="button"
                       onClick={() => navigateTo('knowledge')}
-                      className="text-[11px] font-medium text-blue-900 hover:underline cursor-pointer"
+                      className="text-xs font-medium text-blue-900 hover:underline cursor-pointer"
                     >
                       ノートを開く
                     </button>
                   </div>
 
-                  {/* Subject Pills */}
-                  <div className="flex flex-wrap gap-1.5">
-                    {state.subjects.map((sub) => {
-                      const active = sub === paneSubject;
-                      return (
+                  {state.subjects.length === 0 ? (
+                    <p className="text-xs text-slate-500 py-2">
+                      科目が未登録です。中央画面または設定から科目を作成してください。
+                    </p>
+                  ) : (
+                    <>
+                      {/* Subject Pills */}
+                      <div className="flex flex-wrap gap-1.5">
+                        {state.subjects.map((sub) => {
+                          const active = sub === paneSubject;
+                          return (
+                            <button
+                              key={sub}
+                              type="button"
+                              onClick={() => {
+                                setPaneSubject(sub);
+                                setPaneFolder('ALL');
+                              }}
+                              className={`px-2 py-1 rounded-md text-xs font-medium cursor-pointer transition-colors ${
+                                active
+                                  ? 'bg-blue-900 text-white'
+                                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                              }`}
+                            >
+                              {sub}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Folder Tree */}
+                      <div className="space-y-0.5">
                         <button
-                          key={sub}
                           type="button"
                           onClick={() => {
-                            setPaneSubject(sub);
                             setPaneFolder('ALL');
-                          }}
-                          className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer transition-colors ${
-                            active
-                              ? 'bg-blue-900 text-white'
-                              : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                          }`}
-                        >
-                          {sub}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* Folder Tree */}
-                  <div className="space-y-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPaneFolder('ALL');
-                        navigateTo('knowledge');
-                      }}
-                      className={`w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs transition-colors cursor-pointer ${
-                        activeTab === 'knowledge' && paneFolder === 'ALL'
-                          ? 'bg-blue-50 text-blue-950 font-semibold'
-                          : 'text-slate-700 hover:bg-slate-50'
-                      }`}
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <FolderOpen className="w-3.5 h-3.5 text-slate-400" />
-                        <span>{paneSubject} すべて</span>
-                      </span>
-                      <span className="text-slate-500 tabular-nums">
-                        {countItemsInPath(paneSubject)}
-                      </span>
-                    </button>
-
-                    {activeFoldersForPane.map((folderPath) => {
-                      const parts = folderPath.split('/');
-                      const isDepth2 = parts.length === 3;
-                      const name = parts[parts.length - 1];
-                      const active = activeTab === 'knowledge' && paneFolder === folderPath;
-                      return (
-                        <button
-                          key={folderPath}
-                          type="button"
-                          onClick={() => {
-                            setPaneFolder(folderPath);
                             navigateTo('knowledge');
                           }}
-                          className={`w-full flex items-center justify-between py-1.5 pr-2.5 rounded-lg text-xs transition-colors cursor-pointer ${
-                            isDepth2 ? 'pl-6' : 'pl-2.5'
-                          } ${
-                            active
+                          className={`w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs transition-colors cursor-pointer ${
+                            activeTab === 'knowledge' && paneFolder === 'ALL'
                               ? 'bg-blue-50 text-blue-950 font-semibold'
                               : 'text-slate-700 hover:bg-slate-50'
                           }`}
                         >
-                          <span className="flex items-center gap-1.5 min-w-0">
-                            <Folder className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span className="truncate">{name}</span>
+                          <span className="flex items-center gap-1.5">
+                            <FolderOpen className="w-3.5 h-3.5 text-slate-400" />
+                            <span>{paneSubject} すべて</span>
                           </span>
-                          <span className="text-slate-500 tabular-nums shrink-0">
-                            {countItemsInPath(folderPath)}
+                          <span className="text-slate-500 tabular-nums">
+                            {countItemsInPath(paneSubject)}
                           </span>
                         </button>
-                      );
-                    })}
-                  </div>
+
+                        {activeFoldersForPane.map((folderPath) => {
+                          const parts = folderPath.split('/');
+                          const isDepth2 = parts.length === 3;
+                          const name = parts[parts.length - 1];
+                          const active = activeTab === 'knowledge' && paneFolder === folderPath;
+                          return (
+                            <button
+                              key={folderPath}
+                              type="button"
+                              onClick={() => {
+                                setPaneFolder(folderPath);
+                                navigateTo('knowledge');
+                              }}
+                              className={`w-full flex items-center justify-between py-1 pr-2 rounded-lg text-xs transition-colors cursor-pointer ${
+                                isDepth2 ? 'pl-5' : 'pl-2'
+                              } ${
+                                active
+                                  ? 'bg-blue-50 text-blue-950 font-semibold'
+                                  : 'text-slate-700 hover:bg-slate-50'
+                              }`}
+                            >
+                              <span className="flex items-center gap-1.5 min-w-0">
+                                <Folder className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                <span className="truncate">{name}</span>
+                              </span>
+                              <span className="text-slate-500 tabular-nums shrink-0">
+                                {countItemsInPath(folderPath)}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
                 </aside>
 
                 {/* Center Pane: GradingDesk OR KnowledgeNotebook */}
@@ -484,12 +549,12 @@ export default function App() {
                     <GradingDesk
                       subjects={state.subjects}
                       hasApiKey={hasApiKey}
-                      maxPdfPages={state.limits.maxPdfPages}
                       isOnline={isOnline}
                       onOpenSettings={() => setShowSettings(true)}
                       onStateUpdated={setState}
                       onJumpToKnowledge={handleJumpToKnowledge}
                       onJumpToTendency={handleJumpToTendency}
+                      onBusyChange={setGradingBusy}
                     />
                   ) : (
                     <>
@@ -500,6 +565,7 @@ export default function App() {
                           focusedQuery={focusedKnowledge}
                           onClearFocusedQuery={() => setFocusedKnowledge(null)}
                           onStateUpdated={setState}
+                          onBusyChange={setNotebookBusy}
                         />
                       </div>
                       <div className="hidden lg:block">
@@ -515,6 +581,7 @@ export default function App() {
                             setPaneFolder(folder);
                           }}
                           hideFolderSidebar
+                          onBusyChange={setNotebookBusy}
                         />
                       </div>
                     </>
@@ -522,30 +589,30 @@ export default function App() {
                 </div>
 
                 {/* Right Pane (PC only): Active Tendencies Panel */}
-                <aside className="hidden lg:block lg:col-span-3 bg-white border border-slate-200 rounded-xl p-4 space-y-3 sticky top-20 max-h-[calc(100vh-7rem)] overflow-y-auto">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                <aside className="hidden lg:block lg:col-span-3 bg-white border border-slate-200 rounded-xl p-3 space-y-2.5 sticky top-16 max-h-[calc(100vh-5.5rem)] overflow-y-auto">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-1.5">
                     <span className="text-xs font-semibold text-slate-700">
                       注意すべきミスの傾向
                     </span>
                     <button
                       type="button"
                       onClick={() => navigateTo('tendencies')}
-                      className="text-[11px] font-medium text-blue-900 hover:underline cursor-pointer"
+                      className="text-xs font-medium text-blue-900 hover:underline cursor-pointer"
                     >
                       すべて見る
                     </button>
                   </div>
 
                   {activeTendencies.length === 0 ? (
-                    <p className="text-xs text-slate-500 py-3">
+                    <p className="text-xs text-slate-500 py-2">
                       現在表示中の不注意ミス傾向はありません。
                     </p>
                   ) : (
-                    <div className="space-y-2.5">
+                    <div className="space-y-2">
                       {activeTendencies.slice(0, 8).map((t) => (
                         <div
                           key={t.tendency_id}
-                          className="border border-slate-200 rounded-lg p-3 space-y-1.5 bg-slate-50/50"
+                          className="border border-slate-200 rounded-lg p-2.5 space-y-1 bg-slate-50/50"
                         >
                           <div className="flex items-start justify-between gap-2">
                             <button
@@ -555,11 +622,11 @@ export default function App() {
                             >
                               {t.name}
                             </button>
-                            <span className="text-[11px] font-semibold text-amber-800 shrink-0 tabular-nums">
+                            <span className="text-xs font-semibold text-amber-800 shrink-0 tabular-nums">
                               {t.occurrences.length}回
                             </span>
                           </div>
-                          <div className="text-[11px] text-slate-500 flex items-center justify-between gap-2">
+                          <div className="text-xs text-slate-500 flex items-center justify-between gap-2">
                             <span>
                               {t.category} · {t.subjects.join('/')}
                             </span>
@@ -594,7 +661,8 @@ export default function App() {
 
                 {activeTab === 'history' && (
                   <ReviewHistory
-                    reviews={state.reviews}
+                    state={state}
+                    onStateUpdated={setState}
                     onJumpToKnowledge={handleJumpToKnowledge}
                     onJumpToTendency={handleJumpToTendency}
                   />
@@ -616,7 +684,7 @@ export default function App() {
       {/* Mobile Fixed Bottom Navigation Bar (< lg) */}
       <nav
         aria-label="メインナビゲーション"
-        className="no-print lg:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-slate-200 safe-bottom"
+        className="lg:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t border-slate-200 safe-bottom"
       >
         <div className="grid grid-cols-5">
           {(
@@ -634,11 +702,11 @@ export default function App() {
                 key={tabKey}
                 type="button"
                 onClick={() => navigateTo(tabKey)}
-                className={`min-h-[52px] py-1.5 flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium transition-colors cursor-pointer ${
+                className={`min-h-[max(44px,2.75rem)] py-1 flex flex-col items-center justify-center gap-0.5 text-xs leading-tight font-medium transition-colors cursor-pointer ${
                   active ? 'text-blue-900 font-semibold' : 'text-slate-500 hover:text-slate-900'
                 }`}
               >
-                <Icon className="w-5 h-5" />
+                <Icon className="w-4 h-4" />
                 <span>{label}</span>
               </button>
             );
@@ -662,6 +730,8 @@ export default function App() {
       {showSettings && state && (
         <SettingsModal
           state={state}
+          fontScale={fontScale}
+          onFontScaleChange={handleFontScaleChange}
           onClose={() => setShowSettings(false)}
           onStateUpdated={setState}
           onApiKeyChanged={() => setHasApiKey(Boolean(getApiKey()))}

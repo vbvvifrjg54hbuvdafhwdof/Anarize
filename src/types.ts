@@ -8,17 +8,13 @@ export type MistakeCause = 'knowledge' | 'carelessness' | 'both' | 'none';
 
 export type GradingBasis = 'model_answer' | 'ai_grading';
 
+export const FONT_SCALE_MIN = 70;
+export const FONT_SCALE_MAX = 140;
+export const FONT_SCALE_STEP = 5;
+export const DEFAULT_FONT_SCALE = 90;
+
 export interface AppLimits {
-  maxHeadingLength: number;
-  maxTendencyNameLength: number;
-  maxExplanationLength: number;
-  maxSituationLength: number;
-  maxReasonLength: number;
-  maxSavePerReview: number;
-  maxTendencyPerReview: number;
-  maxNoteLength: number;
   maxToolRounds: number;
-  maxPdfPages: number;
   autoHideTendencyReviews: number;
 }
 
@@ -160,8 +156,9 @@ export interface ImportPreviewCounts {
 }
 
 export interface ReviewProgressEvent {
-  type: 'progress' | 'clarification' | 'completed' | 'error';
+  type: 'progress' | 'stream_text' | 'clarification' | 'completed' | 'error';
   message?: string;
+  text?: string;
   round?: number;
   sessionId?: string;
   review?: ReviewRecord;

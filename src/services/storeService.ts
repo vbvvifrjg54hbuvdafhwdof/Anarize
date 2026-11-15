@@ -1,30 +1,84 @@
 import { db, type MetaRecord } from '../db/database.ts';
-import type {
-  AppLimits,
-  AppState,
-  ExportDataBundle,
-  ImportPreviewCounts,
-  KnowledgeItem,
-  OperationLogEntry,
-  OrganizationMode,
-  PdfExportSettings,
+import {
+  type AppLimits,
+  type AppState,
+  DEFAULT_FONT_SCALE,
+  type ExportDataBundle,
+  FONT_SCALE_MAX,
+  FONT_SCALE_MIN,
+  FONT_SCALE_STEP,
+  type ImportPreviewCounts,
+  type KnowledgeItem,
+  type OperationLogEntry,
+  type OrganizationMode,
+  type PdfExportSettings,
+  type Tendency,
+  type TendencyOccurrence,
 } from '../types.ts';
 
 const API_KEY_STORAGE_KEY = 'anarize_gemini_api_key';
+const FONT_SCALE_STORAGE_KEY = 'anarize_font_scale';
+const LEGACY_DISPLAY_SIZE_STORAGE_KEY = 'anarize_display_size';
+
+export function clampFontScale(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_FONT_SCALE;
+  const snapped = Math.round(value / FONT_SCALE_STEP) * FONT_SCALE_STEP;
+  return Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, snapped));
+}
+
+export function getFontScale(): number {
+  try {
+    const raw = localStorage.getItem(FONT_SCALE_STORAGE_KEY);
+    if (raw !== null) {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) return clampFontScale(parsed);
+    }
+    const legacy = localStorage.getItem(LEGACY_DISPLAY_SIZE_STORAGE_KEY);
+    if (legacy === 'small') return 90;
+    if (legacy === 'standard') return 100;
+    if (legacy === 'large') return 115;
+  } catch {
+    // ignore
+  }
+  return DEFAULT_FONT_SCALE;
+}
+
+export function applyFontScale(scale: number): void {
+  if (typeof document !== 'undefined') {
+    const clamped = clampFontScale(scale);
+    document.documentElement.style.fontSize = `${(16 * clamped) / 100}px`;
+    document.documentElement.dataset.fontScale = String(clamped);
+  }
+}
+
+export function setFontScale(scale: number): number {
+  const clamped = clampFontScale(scale);
+  try {
+    localStorage.setItem(FONT_SCALE_STORAGE_KEY, String(clamped));
+  } catch {
+    // ignore
+  }
+  applyFontScale(clamped);
+  return clamped;
+}
 
 export const DEFAULT_LIMITS: AppLimits = {
-  maxHeadingLength: 40,
-  maxTendencyNameLength: 30,
-  maxExplanationLength: 200,
-  maxSituationLength: 60,
-  maxReasonLength: 60,
-  maxSavePerReview: 5,
-  maxTendencyPerReview: 5,
-  maxNoteLength: 300,
-  maxToolRounds: 6,
-  maxPdfPages: 5,
+  maxToolRounds: 20,
   autoHideTendencyReviews: 5,
 };
+
+function sanitizeLimits(raw?: Partial<AppLimits> | null): AppLimits {
+  return {
+    maxToolRounds:
+      typeof raw?.maxToolRounds === 'number' && raw.maxToolRounds >= 1
+        ? raw.maxToolRounds
+        : DEFAULT_LIMITS.maxToolRounds,
+    autoHideTendencyReviews:
+      typeof raw?.autoHideTendencyReviews === 'number' && raw.autoHideTendencyReviews >= 0
+        ? raw.autoHideTendencyReviews
+        : DEFAULT_LIMITS.autoHideTendencyReviews,
+  };
+}
 
 export const DEFAULT_PDF_SETTINGS: PdfExportSettings = {
   displayMode: 'normal',
@@ -44,17 +98,8 @@ export const DEFAULT_PDF_SETTINGS: PdfExportSettings = {
 function createInitialMeta(): MetaRecord {
   return {
     key: 'workspace',
-    subjects: ['数学', '英語', '国語', '物理', '日本史'],
-    folders: [
-      '数学/三角関数',
-      '数学/二次関数',
-      '数学/微分積分',
-      '英語/仮定法',
-      '英語/関係詞',
-      '国語/古文単語',
-      '物理/力学',
-      '日本史/近代史',
-    ],
+    subjects: [],
+    folders: [],
     mode: '確認',
     limits: { ...DEFAULT_LIMITS },
     pdfSettings: { ...DEFAULT_PDF_SETTINGS },
@@ -244,15 +289,15 @@ export async function loadState(): Promise<AppState> {
   logs.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
   const state: AppState = {
-    subjects: meta.subjects.length > 0 ? meta.subjects : createInitialMeta().subjects,
-    folders: meta.folders ?? [],
+    subjects: Array.isArray(meta.subjects) ? meta.subjects : [],
+    folders: Array.isArray(meta.folders) ? meta.folders : [],
     items,
     tendencies,
     reviews,
     proposals,
     logs,
     mode: meta.mode === '一任' || meta.mode === '確認' ? meta.mode : '確認',
-    limits: { ...DEFAULT_LIMITS, ...(meta.limits ?? {}) },
+    limits: sanitizeLimits(meta.limits),
     pdfSettings: { ...DEFAULT_PDF_SETTINGS, ...(meta.pdfSettings ?? {}) },
     consentAccepted: Boolean(meta.consentAccepted),
     consentAcceptedAt: meta.consentAcceptedAt,
@@ -337,7 +382,6 @@ export async function addSubject(name: string): Promise<{ ok: boolean; error?: s
   const clean = name.trim();
   if (!clean) return { ok: false, error: '科目名を入力してください。' };
   if (clean.includes('/')) return { ok: false, error: '科目名に「/」は使えません。' };
-  if (clean.length > 20) return { ok: false, error: '科目名は20文字以内にしてください。' };
   const state = await loadState();
   if (state.subjects.includes(clean)) {
     return { ok: false, error: '同じ科目名が既に存在します。' };
@@ -355,7 +399,6 @@ export async function renameSubject(
   const cleanNew = newName.trim();
   if (!cleanNew) return { ok: false, error: '新しい科目名を入力してください。' };
   if (cleanNew.includes('/')) return { ok: false, error: '科目名に「/」は使えません。' };
-  if (cleanNew.length > 20) return { ok: false, error: '科目名は20文字以内にしてください。' };
 
   const state = await loadState();
   const idx = state.subjects.indexOf(oldName);
@@ -390,20 +433,289 @@ export async function renameSubject(
   return { ok: true, state };
 }
 
-export async function deleteSubject(name: string): Promise<{ ok: boolean; error?: string; state?: AppState }> {
+function reconcileTendencyOccurrences(
+  t: Tendency,
+  keptOccurrences: TendencyOccurrence[]
+): Tendency | null {
+  if (keptOccurrences.length === 0) return null;
+  const nextSubjects = Array.from(new Set(keptOccurrences.map((o) => o.subject)));
+  let nextVisibleIn = t.visible_in.filter((s) => nextSubjects.includes(s));
+  if (!t.hidden && nextVisibleIn.length === 0) {
+    nextVisibleIn = [...nextSubjects];
+  }
+  return {
+    ...t,
+    subjects: nextSubjects,
+    visible_in: nextVisibleIn,
+    occurrences: keptOccurrences,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+export interface DeleteImpactSummary {
+  details: string[];
+}
+
+export function previewDeleteSubject(state: AppState, name: string): DeleteImpactSummary {
+  const folderCount = state.folders.filter((f) => f === name || f.startsWith(`${name}/`)).length;
+  const itemsInSub = state.items.filter(
+    (i) => i.folder_path === name || i.folder_path.startsWith(`${name}/`)
+  );
+  const activeItemCount = itemsInSub.filter((i) => !i.hidden).length;
+  const hiddenItemCount = itemsInSub.length - activeItemCount;
+  const reviewCount = state.reviews.filter((r) => r.subject === name).length;
+  let occCount = 0;
+  let emptiedTendencies = 0;
+  for (const t of state.tendencies) {
+    const matching = t.occurrences.filter((o) => o.subject === name).length;
+    if (matching > 0) {
+      occCount += matching;
+      if (matching >= t.occurrences.length) emptiedTendencies += 1;
+    }
+  }
+  const proposalCount = state.proposals.filter((p) =>
+    Object.values(p.args).some((v) => v === name || v.startsWith(`${name}/`))
+  ).length;
+
+  const details: string[] = [
+    `単元フォルダ: ${folderCount}件`,
+    `知識項目: ${activeItemCount}件${hiddenItemCount > 0 ? `（非表示・統合済み ${hiddenItemCount}件を含む）` : ''}`,
+    `添削履歴: ${reviewCount}件`,
+    `傾向の発生記録: ${occCount}件${emptiedTendencies > 0 ? `（うち ${emptiedTendencies}件の傾向は記録が0になるため傾向ごと削除）` : ''}`,
+  ];
+  if (proposalCount > 0) {
+    details.push(`関連する整理提案: ${proposalCount}件`);
+  }
+  return { details };
+}
+
+export async function deleteSubjectCascade(
+  name: string
+): Promise<{ ok: boolean; error?: string; state?: AppState }> {
   const state = await loadState();
   if (!state.subjects.includes(name)) return { ok: false, error: '対象の科目が見つかりません。' };
-  const hasItems = state.items.some(
-    (i) => !i.hidden && (i.folder_path === name || i.folder_path.startsWith(`${name}/`))
-  );
-  if (hasItems) {
-    return { ok: false, error: '知識項目が残っている科目は削除できません。項目を移動してから削除してください。' };
-  }
+
   state.subjects = state.subjects.filter((s) => s !== name);
   state.folders = state.folders.filter((f) => f !== name && !f.startsWith(`${name}/`));
-  appendLog(state, '科目削除', `科目「${name}」を削除`);
+  state.items = state.items.filter(
+    (i) => i.folder_path !== name && !i.folder_path.startsWith(`${name}/`)
+  );
+  state.reviews = state.reviews.filter((r) => r.subject !== name);
+  state.proposals = state.proposals.filter(
+    (p) => !Object.values(p.args).some((v) => v === name || v.startsWith(`${name}/`))
+  );
+  state.tendencies = state.tendencies
+    .map((t) => {
+      const kept = t.occurrences.filter((o) => o.subject !== name);
+      return reconcileTendencyOccurrences(t, kept);
+    })
+    .filter((t): t is Tendency => t !== null);
+
+  appendLog(state, '科目削除', `科目「${name}」と配下データを連動削除しました`);
   await saveState(state);
   return { ok: true, state };
+}
+
+export function previewDeleteFolder(state: AppState, folderPath: string): DeleteImpactSummary {
+  const norm = normalizePath(folderPath);
+  const childFolderCount = state.folders.filter((f) => f.startsWith(`${norm}/`)).length;
+  const itemsInFolder = state.items.filter(
+    (i) => i.folder_path === norm || i.folder_path.startsWith(`${norm}/`)
+  );
+  const activeCount = itemsInFolder.filter((i) => !i.hidden).length;
+  const hiddenCount = itemsInFolder.length - activeCount;
+
+  const details: string[] = [
+    `削除対象フォルダ: ${norm}（子フォルダ ${childFolderCount}件を含む）`,
+    `配下の知識項目: ${activeCount}件${hiddenCount > 0 ? `（非表示・統合済み ${hiddenCount}件を含む）` : ''}`,
+    '※ 添削履歴・ミスの傾向は保持されます',
+  ];
+  return { details };
+}
+
+export async function deleteFolderCascade(
+  folderPath: string
+): Promise<{ ok: boolean; error?: string; state?: AppState }> {
+  const norm = normalizePath(folderPath);
+  const state = await loadState();
+  if (!state.folders.includes(norm)) {
+    return { ok: false, error: '対象のフォルダが見つかりません。' };
+  }
+
+  state.folders = state.folders.filter((f) => f !== norm && !f.startsWith(`${norm}/`));
+  state.items = state.items.filter(
+    (i) => i.folder_path !== norm && !i.folder_path.startsWith(`${norm}/`)
+  );
+  appendLog(state, 'フォルダ削除', `「${norm}」と配下の知識項目を削除しました`);
+  await saveState(state);
+  return { ok: true, state };
+}
+
+export function previewDeleteKnowledgeItem(item: KnowledgeItem): DeleteImpactSummary {
+  return {
+    details: [
+      `フォルダ: ${item.folder_path}`,
+      `ミス回数: ${item.mistake_count}回`,
+      item.hidden ? '状態: 非表示・統合済み' : '状態: 表示中（知識ノート・PDF出力から削除）',
+    ],
+  };
+}
+
+export async function deleteKnowledgeItem(
+  itemId: string
+): Promise<{ ok: boolean; error?: string; state?: AppState }> {
+  const state = await loadState();
+  const target = state.items.find((i) => i.id === itemId);
+  if (!target) return { ok: false, error: '対象の知識項目が見つかりません。' };
+
+  state.items = state.items
+    .filter((i) => i.id !== itemId)
+    .map((i) => (i.merged_into_id === itemId ? { ...i, merged_into_id: undefined } : i));
+  appendLog(state, '知識項目削除', `${target.folder_path}/${target.heading}`);
+  await saveState(state);
+  return { ok: true, state };
+}
+
+export function previewDeleteTendency(tendency: Tendency): DeleteImpactSummary {
+  return {
+    details: [
+      `分類: ${tendency.category}`,
+      `発生科目: ${tendency.subjects.join(' / ') || 'なし'}`,
+      `発生記録: ${tendency.occurrences.length}件（この傾向ログと全記録を削除）`,
+    ],
+  };
+}
+
+export async function deleteTendency(
+  tendencyId: string
+): Promise<{ ok: boolean; error?: string; state?: AppState }> {
+  const state = await loadState();
+  const target = state.tendencies.find((t) => t.tendency_id === tendencyId);
+  if (!target) return { ok: false, error: '対象の傾向が見つかりません。' };
+
+  state.tendencies = state.tendencies.filter((t) => t.tendency_id !== tendencyId);
+  appendLog(state, '傾向削除', `「${target.name}」（記録${target.occurrences.length}件）`);
+  await saveState(state);
+  return { ok: true, state };
+}
+
+export function previewDeleteReview(state: AppState, reviewId: string): DeleteImpactSummary {
+  const rev = state.reviews.find((r) => r.review_id === reviewId);
+  let occCount = 0;
+  let emptiedCount = 0;
+  for (const t of state.tendencies) {
+    const matched = t.occurrences.filter((o) => o.review_id === reviewId).length;
+    if (matched > 0) {
+      occCount += matched;
+      if (matched >= t.occurrences.length) emptiedCount += 1;
+    }
+  }
+  return {
+    details: [
+      `対象: ${rev ? `${rev.subject} (${rev.date})` : '添削履歴 1件'}`,
+      `この添削で記録された傾向の発生記録: ${occCount}件を削除${emptiedCount > 0 ? `（${emptiedCount}件の傾向は記録0となり自動削除）` : ''}`,
+      '※ 知識ノートに登録済みの知識項目はそのまま残ります',
+    ],
+  };
+}
+
+export async function deleteReviewCascade(
+  reviewId: string
+): Promise<{ ok: boolean; error?: string; state?: AppState }> {
+  const state = await loadState();
+  const target = state.reviews.find((r) => r.review_id === reviewId);
+  if (!target) return { ok: false, error: '対象の添削履歴が見つかりません。' };
+
+  state.reviews = state.reviews.filter((r) => r.review_id !== reviewId);
+  state.tendencies = state.tendencies
+    .map((t) => {
+      const kept = t.occurrences.filter((o) => o.review_id !== reviewId);
+      return reconcileTendencyOccurrences(t, kept);
+    })
+    .filter((t): t is Tendency => t !== null);
+
+  appendLog(state, '添削履歴削除', `${target.subject} (${target.date})`);
+  await saveState(state);
+  return { ok: true, state };
+}
+
+export function previewDeleteAllReviews(state: AppState): DeleteImpactSummary {
+  const linkedReviewIds = new Set(state.reviews.map((r) => r.review_id));
+  let occCount = 0;
+  let emptiedCount = 0;
+  for (const t of state.tendencies) {
+    const matched = t.occurrences.filter((o) => o.review_id && linkedReviewIds.has(o.review_id)).length;
+    if (matched > 0) {
+      occCount += matched;
+      if (matched >= t.occurrences.length) emptiedCount += 1;
+    }
+  }
+  return {
+    details: [
+      `添削履歴: ${state.reviews.length}件をすべて削除`,
+      `履歴に紐づく傾向の発生記録: ${occCount}件を削除${emptiedCount > 0 ? `（${emptiedCount}件の傾向は記録0となり削除）` : ''}`,
+      '※ 科目・単元フォルダ・知識項目はそのまま残ります',
+    ],
+  };
+}
+
+export async function deleteAllReviewsCascade(): Promise<AppState> {
+  const state = await loadState();
+  const removedCount = state.reviews.length;
+  const linkedReviewIds = new Set(state.reviews.map((r) => r.review_id));
+  state.reviews = [];
+  state.tendencies = state.tendencies
+    .map((t) => {
+      const kept = t.occurrences.filter((o) => !o.review_id || !linkedReviewIds.has(o.review_id));
+      return reconcileTendencyOccurrences(t, kept);
+    })
+    .filter((t): t is Tendency => t !== null);
+
+  appendLog(state, '添削履歴一括削除', `添削履歴 ${removedCount}件を一括削除しました`);
+  await saveState(state);
+  return state;
+}
+
+export async function deleteProposal(
+  proposalId: string
+): Promise<{ ok: boolean; error?: string; state?: AppState }> {
+  const state = await loadState();
+  const target = state.proposals.find((p) => p.proposal_id === proposalId);
+  if (!target) return { ok: false, error: '対象の整理提案が見つかりません。' };
+  state.proposals = state.proposals.filter((p) => p.proposal_id !== proposalId);
+  appendLog(state, '整理提案削除', target.summary);
+  await saveState(state);
+  return { ok: true, state };
+}
+
+export async function deleteResolvedProposals(): Promise<AppState> {
+  const state = await loadState();
+  const removedCount = state.proposals.filter((p) => p.status !== 'pending').length;
+  state.proposals = state.proposals.filter((p) => p.status === 'pending');
+  appendLog(state, '整理提案削除', `処理済みの整理提案 ${removedCount}件を削除`);
+  await saveState(state);
+  return state;
+}
+
+export async function clearOperationLogs(): Promise<AppState> {
+  const state = await loadState();
+  state.logs = [];
+  await saveState(state);
+  return state;
+}
+
+export function previewResetAllStudyData(state: AppState): DeleteImpactSummary {
+  return {
+    details: [
+      `科目: ${state.subjects.length}件`,
+      `単元フォルダ: ${state.folders.length}件`,
+      `知識項目: ${state.items.length}件`,
+      `ミスの傾向: ${state.tendencies.length}件`,
+      `添削履歴: ${state.reviews.length}件`,
+      `整理提案: ${state.proposals.length}件 · 操作ログ: ${state.logs.length}件`,
+      '※ APIキー・同意記録・文字サイズ・整理モード・PDF設定は保持されます',
+    ],
+  };
 }
 
 export async function createUserFolder(folderPath: string): Promise<{ ok: boolean; error?: string; state?: AppState }> {
@@ -411,7 +723,6 @@ export async function createUserFolder(folderPath: string): Promise<{ ok: boolea
   const parts = splitPath(norm);
   if (parts.length < 2) return { ok: false, error: '科目の下の単元フォルダ名を指定してください。' };
   if (parts.length > 3) return { ok: false, error: 'フォルダ階層は科目の下に最大2段までです。' };
-  if (parts[parts.length - 1].length > 40) return { ok: false, error: 'フォルダ名は40文字以内にしてください。' };
 
   const state = await loadState();
   if (!state.subjects.includes(parts[0])) return { ok: false, error: '指定された科目が存在しません。' };
@@ -436,11 +747,11 @@ export async function updateKnowledgeItem(
   const nextExplanation = updates.explanation !== undefined ? updates.explanation.trim() : item.explanation;
   const nextFolder = updates.folder_path !== undefined ? normalizePath(updates.folder_path) : item.folder_path;
 
-  if (!nextHeading || nextHeading.length > state.limits.maxHeadingLength) {
-    return { ok: false, error: `見出しは1〜${state.limits.maxHeadingLength}文字にしてください。` };
+  if (!nextHeading) {
+    return { ok: false, error: '見出しを入力してください。' };
   }
-  if (!nextExplanation || nextExplanation.length > state.limits.maxExplanationLength) {
-    return { ok: false, error: `解説は1〜${state.limits.maxExplanationLength}文字にしてください。` };
+  if (!nextExplanation) {
+    return { ok: false, error: '解説を入力してください。' };
   }
 
   const parts = splitPath(nextFolder);
@@ -542,7 +853,7 @@ export function parseAndPreviewImportBundle(rawJson: string): {
   }
 
   const b = parsed as Partial<ExportDataBundle>;
-  if (!Array.isArray(b.subjects) || b.subjects.length === 0) {
+  if (!Array.isArray(b.subjects)) {
     return { ok: false, error: '科目データ（subjects）が含まれていません。' };
   }
   if (
@@ -565,7 +876,7 @@ export function parseAndPreviewImportBundle(rawJson: string): {
     proposals: Array.isArray(b.proposals) ? b.proposals : [],
     logs: Array.isArray(b.logs) ? b.logs : [],
     mode: b.mode === '一任' || b.mode === '確認' ? b.mode : '確認',
-    limits: { ...DEFAULT_LIMITS, ...(b.limits ?? {}) },
+    limits: sanitizeLimits(b.limits),
     pdfSettings: b.pdfSettings ? { ...DEFAULT_PDF_SETTINGS, ...b.pdfSettings } : undefined,
   };
 
@@ -682,4 +993,25 @@ export async function executeImportBundle(
   appendLog(nextState, 'バックアップ復元（結合）', `項目${bundle.items.length}件を既存データに結合しました`);
   await saveState(nextState);
   return nextState;
+}
+
+export async function resetAllStudyData(): Promise<AppState> {
+  const current = await loadState();
+  const clearedState: AppState = {
+    subjects: [],
+    folders: [],
+    items: [],
+    tendencies: [],
+    reviews: [],
+    proposals: [],
+    logs: [],
+    mode: current.mode,
+    limits: current.limits,
+    pdfSettings: current.pdfSettings,
+    consentAccepted: current.consentAccepted,
+    consentAcceptedAt: current.consentAcceptedAt,
+    installGuideDismissed: current.installGuideDismissed,
+  };
+  await saveState(clearedState);
+  return clearedState;
 }

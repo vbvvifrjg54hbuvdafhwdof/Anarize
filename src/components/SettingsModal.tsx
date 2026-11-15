@@ -19,44 +19,63 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { APP_FULL_NAME, APP_NAME } from '../config.ts';
-import { testApiKeyConnection } from '../services/geminiClient.ts';
-import { clearAppCachesAndReload } from '../utils/cacheRecovery.ts';
+import { APP_BUILD_VERSION, APP_FULL_NAME, APP_NAME } from '../config.ts';
+import { clearAllSessions, testApiKeyConnection } from '../services/geminiClient.ts';
 import {
   addSubject,
   checkStoragePersisted,
   clearApiKey,
-  deleteSubject,
+  clearOperationLogs,
+  deleteSubjectCascade,
   executeImportBundle,
   exportAllDataBundle,
   getApiKey,
   getTodayJST,
   loadState,
   parseAndPreviewImportBundle,
+  previewDeleteSubject,
+  previewResetAllStudyData,
   renameSubject,
   requestStoragePersistence,
+  resetAllStudyData,
   setApiKey,
   setMode,
   updateLimits,
 } from '../services/storeService.ts';
-import type {
-  AppLimits,
-  AppState,
-  ExportDataBundle,
-  ImportPreviewCounts,
-  OrganizationMode,
+import {
+  type AppLimits,
+  type AppState,
+  DEFAULT_FONT_SCALE,
+  type ExportDataBundle,
+  FONT_SCALE_MAX,
+  FONT_SCALE_MIN,
+  FONT_SCALE_STEP,
+  type ImportPreviewCounts,
+  type OrganizationMode,
 } from '../types.ts';
+import { clearAppCachesAndReload } from '../utils/cacheRecovery.ts';
+import { ConfirmDeleteFlow } from './ConfirmDeleteFlow.tsx';
 import { PWAInstallSection } from './PWAInstallSection.tsx';
 
 interface SettingsModalProps {
   state: AppState;
+  fontScale: number;
+  onFontScaleChange: (scale: number) => void;
   onClose: () => void;
   onStateUpdated: (state: AppState) => void;
   onApiKeyChanged?: () => void;
 }
 
+const FONT_SCALE_PRESETS = [
+  { label: '小 (85%)', value: 85 },
+  { label: '標準 (100%)', value: 100 },
+  { label: '大 (120%)', value: 120 },
+] as const;
+
 export function SettingsModal({
   state,
+  fontScale,
+  onFontScaleChange,
   onClose,
   onStateUpdated,
   onApiKeyChanged,
@@ -83,6 +102,12 @@ export function SettingsModal({
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+
+  const [confirmDeleteKeyOpen, setConfirmDeleteKeyOpen] = useState(false);
+  const [deleteSubjectTarget, setDeleteSubjectTarget] = useState<string | null>(null);
+  const [confirmClearLogsOpen, setConfirmClearLogsOpen] = useState(false);
+  const [confirmResetAllOpen, setConfirmResetAllOpen] = useState(false);
+
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -155,16 +180,6 @@ export function SettingsModal({
     setRenameValue('');
   };
 
-  const handleDeleteSubject = async (name: string) => {
-    setErrorMsg(null);
-    const res = await deleteSubject(name);
-    if (!res.ok || !res.state) {
-      setErrorMsg(res.error ?? '科目の削除に失敗しました。');
-      return;
-    }
-    onStateUpdated(res.state);
-  };
-
   const handleModeChange = async (mode: OrganizationMode) => {
     setErrorMsg(null);
     const nextState = await setMode(mode);
@@ -176,7 +191,7 @@ export function SettingsModal({
     setSavedNotice(null);
     const nextState = await updateLimits(limits);
     onStateUpdated(nextState);
-    setSavedNotice('上限・PDFページ制限・傾向自動非表示の設定を保存しました。');
+    setSavedNotice('ツール往復上限・傾向自動非表示の設定を保存しました。');
   };
 
   const handleExportJson = async () => {
@@ -232,24 +247,36 @@ export function SettingsModal({
     }
   };
 
+  const handleResetAllData = async () => {
+    setErrorMsg(null);
+    setSavedNotice(null);
+    clearAllSessions();
+    const nextState = await resetAllStudyData();
+    onStateUpdated(nextState);
+    setLimits({ ...nextState.limits });
+    setSavedNotice(
+      '学習データ（科目・フォルダ・知識項目・傾向・添削履歴・提案・操作ログ）をすべて削除しました。APIキーと設定は保持されています。'
+    );
+  };
+
   return (
     <div
-      className="fixed inset-0 z-50 bg-slate-900/45 flex items-center justify-center p-3 sm:p-4"
+      className="fixed inset-0 z-50 bg-slate-900/45 flex items-center justify-center p-2.5 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-label={`${APP_NAME} 設定`}
     >
-      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-2xl max-h-[92vh] overflow-y-auto p-5 sm:p-6 space-y-6">
-        <div className="flex items-center justify-between border-b border-slate-200 pb-4">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-2xl max-h-[92vh] overflow-y-auto p-4 sm:p-5 space-y-4">
+        <div className="flex items-center justify-between border-b border-slate-200 pb-3">
           <div>
-            <h2 className="text-lg font-semibold text-slate-900">設定</h2>
+            <h2 className="text-base font-semibold text-slate-900">設定</h2>
             <p className="text-xs text-slate-500">{APP_FULL_NAME}</p>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="閉じる"
-            className="w-11 h-11 flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 cursor-pointer"
+            className="min-w-[max(44px,2.75rem)] min-h-[max(44px,2.75rem)] flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -276,7 +303,7 @@ export function SettingsModal({
             <button
               type="button"
               onClick={() => setShowApiHelp((v) => !v)}
-              className="min-h-[44px] inline-flex items-center gap-1 px-2 text-xs font-medium text-blue-900 hover:underline cursor-pointer"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1 px-2 text-xs font-medium text-blue-900 hover:underline cursor-pointer"
             >
               <HelpCircle className="w-3.5 h-3.5" />
               <span>{showApiHelp ? '取得ガイド・注意点を閉じる' : '取得方法・注意点・エラー対処'}</span>
@@ -313,14 +340,14 @@ export function SettingsModal({
                   <li>発行された文字列をコピーし、下の欄に貼り付けて「保存」します。</li>
                   <li>「接続テスト」を押して成功メッセージが出れば完了です。</li>
                 </ol>
-                <p className="text-[11px] text-slate-500">
+                <p className="text-[0.75rem] text-slate-500">
                   ※ Google AI Studio の画面名や手順は変わることがあります。最新の公式画面に従って操作してください。
                 </p>
               </div>
 
               <div className="border-t border-slate-200 pt-2.5 space-y-1.5">
                 <div className="font-semibold text-slate-900">利用条件・安全管理・よくあるエラー</div>
-                <ul className="space-y-1 pl-4 list-disc text-[11px] text-slate-600 leading-relaxed">
+                <ul className="space-y-1 pl-4 list-disc text-[0.75rem] text-slate-600 leading-relaxed">
                   <li>
                     <strong>年齢・規約:</strong> Gemini API の利用は原則 18歳以上が対象です（
                     <a
@@ -348,20 +375,20 @@ export function SettingsModal({
           )}
 
           <div className="flex flex-wrap gap-2">
-            <div className="relative flex-1 min-w-[210px]">
+            <div className="relative flex-1 min-w-[13rem]">
               <input
                 type={showApiKey ? 'text' : 'password'}
                 value={apiKeyInput}
                 onChange={(e) => setApiKeyInput(e.target.value)}
                 placeholder="AIza..."
                 autoComplete="off"
-                className="w-full min-h-[44px] rounded-lg border border-slate-300 pl-3 pr-11 py-2 text-sm font-mono text-slate-900"
+                className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 pl-3 pr-12 py-2 font-mono text-slate-900"
               />
               <button
                 type="button"
                 onClick={() => setShowApiKey((v) => !v)}
                 aria-label={showApiKey ? 'キーを隠す' : 'キーを表示'}
-                className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center text-slate-400 hover:text-slate-700 cursor-pointer"
+                className="absolute right-0 top-1/2 -translate-y-1/2 min-w-[max(44px,2.75rem)] min-h-[max(44px,2.75rem)] flex items-center justify-center text-slate-400 hover:text-slate-700 cursor-pointer"
               >
                 {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
@@ -370,7 +397,7 @@ export function SettingsModal({
             <button
               type="button"
               onClick={handleSaveApiKey}
-              className="min-h-[44px] px-4 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[max(44px,2.75rem)] px-4 py-2 rounded-lg bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 cursor-pointer whitespace-nowrap shrink-0"
             >
               保存
             </button>
@@ -378,7 +405,7 @@ export function SettingsModal({
               type="button"
               onClick={() => void handleTestApiKey()}
               disabled={testingKey || !apiKeyInput.trim()}
-              className="min-h-[44px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-blue-900 text-blue-900 text-xs font-semibold hover:bg-blue-50 disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-blue-900 text-blue-900 text-xs font-semibold hover:bg-blue-50 disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
             >
               {testingKey ? (
                 <>
@@ -391,8 +418,8 @@ export function SettingsModal({
             </button>
             <button
               type="button"
-              onClick={handleDeleteApiKey}
-              className="min-h-[44px] px-3 py-2 rounded-lg border border-slate-300 text-xs font-medium text-slate-600 hover:text-red-700 hover:bg-red-50 cursor-pointer whitespace-nowrap shrink-0"
+              onClick={() => setConfirmDeleteKeyOpen(true)}
+              className="min-h-[max(44px,2.75rem)] px-3 py-2 rounded-lg border border-slate-300 text-xs font-medium text-slate-600 hover:text-red-700 hover:bg-red-50 cursor-pointer whitespace-nowrap shrink-0"
             >
               削除
             </button>
@@ -437,7 +464,7 @@ export function SettingsModal({
               ）。
             </p>
             {state.consentAccepted && (
-              <div className="text-[11px] text-emerald-800 font-medium">
+              <div className="text-[0.75rem] text-emerald-800 font-medium">
                 同意済み
                 {state.consentAcceptedAt
                   ? `（${new Date(state.consentAcceptedAt).toLocaleString('ja-JP')}）`
@@ -447,26 +474,103 @@ export function SettingsModal({
           </div>
         </section>
 
-        {/* 2. PWA Install & Cache Maintenance */}
-        <section className="space-y-3 border-t border-slate-200 pt-5">
+        {/* 2. Font Scale Slider */}
+        <section className="space-y-3 border-t border-slate-200 pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">文字サイズ</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {FONT_SCALE_MIN}%〜{FONT_SCALE_MAX}%（{FONT_SCALE_STEP}%刻み / 初期値{' '}
+                {DEFAULT_FONT_SCALE}%）で画面全体の文字と余白を自由に調整できます。PDF出力の文字サイズは独立しており影響を受けません。
+              </p>
+            </div>
+            <span className="text-sm font-bold text-blue-900 tabular-nums shrink-0">
+              現在: {fontScale}%
+            </span>
+          </div>
+
+          <div className="space-y-2">
+            <input
+              type="range"
+              aria-label="文字サイズ倍率"
+              min={FONT_SCALE_MIN}
+              max={FONT_SCALE_MAX}
+              step={FONT_SCALE_STEP}
+              value={fontScale}
+              onChange={(e) => onFontScaleChange(Number(e.target.value))}
+              className="w-full accent-blue-900 cursor-pointer h-8"
+            />
+            <div className="flex items-center justify-between text-[0.75rem] text-slate-500 tabular-nums">
+              <span>{FONT_SCALE_MIN}%</span>
+              <span>初期値 {DEFAULT_FONT_SCALE}%</span>
+              <span>{FONT_SCALE_MAX}%</span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {FONT_SCALE_PRESETS.map((preset) => {
+              const active = fontScale === preset.value;
+              return (
+                <button
+                  key={preset.value}
+                  type="button"
+                  onClick={() => onFontScaleChange(preset.value)}
+                  className={`min-h-[max(44px,2.75rem)] px-3.5 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer transition-colors ${
+                    active
+                      ? 'border-blue-900 bg-blue-50 text-blue-900'
+                      : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => onFontScaleChange(DEFAULT_FONT_SCALE)}
+              className={`min-h-[max(44px,2.75rem)] px-3.5 py-1.5 rounded-lg border text-xs font-medium cursor-pointer transition-colors ${
+                fontScale === DEFAULT_FONT_SCALE
+                  ? 'border-slate-900 bg-slate-900 text-white'
+                  : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              初期値に戻す ({DEFAULT_FONT_SCALE}%)
+            </button>
+          </div>
+
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1">
+            <div className="text-[0.75rem] font-medium text-slate-500">
+              文字サイズのサンプルプレビュー
+            </div>
+            <div className="text-base font-semibold text-slate-900">
+              見出しサンプル：三角関数の合成と最大・最小
+            </div>
+            <p className="text-sm text-slate-700 leading-relaxed">
+              本文サンプル：係数の2乗和の平方根でくくり、合成後の角の範囲を定義域から確認します。入力欄やボタンの押しやすさは端末に最適な大きさを維持します。
+            </p>
+          </div>
+        </section>
+
+        {/* 2b. PWA Install & Cache Maintenance */}
+        <section className="space-y-2.5 border-t border-slate-200 pt-4">
           <h3 className="text-sm font-semibold text-slate-900">アプリインストール（PWA）・更新</h3>
           <PWAInstallSection />
-          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 flex flex-wrap items-center justify-between gap-3">
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 flex flex-wrap items-center justify-between gap-2.5">
             <div className="space-y-0.5 text-xs">
               <div className="font-semibold text-slate-900">
                 古い画面・キャッシュが表示される場合
               </div>
               <p className="text-slate-600">
-                Service Worker と画面キャッシュのみを破棄して最新版を読み込みます（APIキーと学習データは消えません）。
+                Service Worker と画面キャッシュ（Cache Storage）のみを破棄して最新版を読み込みます。APIキー（localStorage）と学習データ（IndexedDB）は消えません。
               </p>
             </div>
             <button
               type="button"
               onClick={() => void clearAppCachesAndReload()}
-              className="min-h-[40px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-100 cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-100 cursor-pointer whitespace-nowrap shrink-0"
             >
               <RefreshCw className="w-3.5 h-3.5" />
-              <span>キャッシュを最新に更新</span>
+              <span>キャッシュを削除して最新版を読み込む</span>
             </button>
           </div>
         </section>
@@ -490,7 +594,7 @@ export function SettingsModal({
                   key={val}
                   type="button"
                   onClick={() => void handleModeChange(val)}
-                  className={`min-h-[44px] text-left p-3.5 rounded-lg border transition-colors cursor-pointer ${
+                  className={`min-h-[max(44px,2.75rem)] text-left p-3.5 rounded-lg border transition-colors cursor-pointer ${
                     active ? 'border-blue-900 bg-blue-50' : 'border-slate-200 hover:bg-slate-50'
                   }`}
                 >
@@ -523,104 +627,104 @@ export function SettingsModal({
                 }
               }}
               placeholder="新しい科目名（例: 化学、世界史）"
-              className="flex-1 min-h-[44px] rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900"
+              className="flex-1 min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-3 py-2 text-slate-900"
             />
             <button
               type="button"
               onClick={() => void handleAddSubject()}
-              className="min-h-[44px] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 cursor-pointer whitespace-nowrap shrink-0"
             >
               <Plus className="w-4 h-4" />
               <span>追加</span>
             </button>
           </div>
 
-          <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg">
-            {state.subjects.map((sub) => {
-              const isRenaming = renamingSubject === sub;
-              return (
-                <div key={sub} className="px-3.5 py-2 flex items-center justify-between gap-2 text-sm">
-                  {isRenaming ? (
-                    <div className="flex-1 flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={renameValue}
-                        onChange={(e) => setRenameValue(e.target.value)}
-                        className="flex-1 min-h-[38px] rounded border border-slate-300 px-2.5 py-1 text-sm"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => void handleConfirmRenameSubject(sub)}
-                        className="min-h-[38px] inline-flex items-center gap-1 px-3 rounded bg-blue-900 text-white text-xs font-medium cursor-pointer"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                        <span>確定</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setRenamingSubject(null)}
-                        className="min-h-[38px] px-2.5 rounded text-xs text-slate-600 hover:bg-slate-100 cursor-pointer"
-                      >
-                        中止
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <span className="font-medium text-slate-800">{sub}</span>
-                      <div className="flex items-center gap-3">
+          {state.subjects.length === 0 ? (
+            <div className="border border-slate-200 rounded-lg p-3 text-xs text-slate-500">
+              科目はまだ登録されていません。上の入力欄から科目を追加してください。
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg">
+              {state.subjects.map((sub) => {
+                const isRenaming = renamingSubject === sub;
+                return (
+                  <div
+                    key={sub}
+                    className="px-3.5 py-2 flex items-center justify-between gap-2 text-sm"
+                  >
+                    {isRenaming ? (
+                      <div className="flex-1 flex flex-wrap items-center gap-2">
+                        <input
+                          type="text"
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          className="flex-1 min-w-[10rem] min-h-[max(44px,2.75rem)] rounded border border-slate-300 px-2.5 py-1.5"
+                        />
                         <button
                           type="button"
-                          onClick={() => {
-                            setRenamingSubject(sub);
-                            setRenameValue(sub);
-                          }}
-                          className="min-h-[36px] inline-flex items-center gap-1 text-xs text-slate-600 hover:text-blue-900 cursor-pointer"
+                          onClick={() => void handleConfirmRenameSubject(sub)}
+                          className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1 px-3 rounded bg-blue-900 text-white text-xs font-medium cursor-pointer"
                         >
-                          <Edit3 className="w-3.5 h-3.5" />
-                          <span>名前変更</span>
+                          <Check className="w-3.5 h-3.5" />
+                          <span>確定</span>
                         </button>
                         <button
                           type="button"
-                          onClick={() => void handleDeleteSubject(sub)}
-                          className="min-h-[36px] inline-flex items-center gap-1 text-xs text-slate-500 hover:text-red-700 cursor-pointer"
+                          onClick={() => setRenamingSubject(null)}
+                          className="min-h-[max(44px,2.75rem)] px-3 rounded text-xs text-slate-600 hover:bg-slate-100 cursor-pointer"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>削除</span>
+                          中止
                         </button>
                       </div>
-                    </>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                    ) : (
+                      <>
+                        <span className="font-medium text-slate-800">{sub}</span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRenamingSubject(sub);
+                              setRenameValue(sub);
+                            }}
+                            className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1 px-2 text-xs text-slate-600 hover:text-blue-900 cursor-pointer"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            <span>名前変更</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeleteSubjectTarget(sub)}
+                            className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1 px-2 text-xs text-red-700 hover:text-red-800 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>削除</span>
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         {/* 5. Limits & Auto-hide */}
-        <section className="space-y-3 border-t border-slate-200 pt-5">
+        <section className="space-y-2.5 border-t border-slate-200 pt-4">
           <div>
             <h3 className="text-sm font-semibold text-slate-900">
-              登録・PDFページ上限・傾向自動非表示
+              添削呼び出し・傾向自動非表示の設定
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              1回の添削における登録件数・文字数・往復上限、PDFページ数上限、および「その科目の添削で連続N回発生しなかった傾向」を自動非表示にする回数を設定します（初期値: 5回）。
+              無限ループ防止のツール往復上限（初期値: 20回）、および「その科目の添削で連続N回発生しなかった傾向」を自動非表示にする回数を設定します（初期値: 5回）。答案枚数・PDFページ数・文字数・登録件数には上限を設けていません。
             </p>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
             {(
               [
-                ['maxPdfPages', 'PDF最大ページ数 (枚)', 1],
-                ['autoHideTendencyReviews', '傾向 自動非表示 (同科目連続回, 0=無効)', 0],
-                ['maxSavePerReview', '知識登録/回 (件)', 1],
-                ['maxTendencyPerReview', '傾向記録/回 (件)', 1],
                 ['maxToolRounds', 'ツール往復上限 (回)', 1],
-                ['maxHeadingLength', '見出し上限 (文字)', 1],
-                ['maxTendencyNameLength', '傾向名上限 (文字)', 1],
-                ['maxExplanationLength', '解説上限 (文字)', 1],
-                ['maxSituationLength', '状況上限 (文字)', 1],
-                ['maxReasonLength', '理由上限 (文字)', 1],
-                ['maxNoteLength', 'ひとこと上限 (文字)', 1],
+                ['autoHideTendencyReviews', '傾向 自動非表示 (同科目連続回, 0=無効)', 0],
               ] as const
             ).map(([key, label, minVal]) => (
               <label key={key} className="space-y-1 block">
@@ -635,7 +739,7 @@ export function SettingsModal({
                       [key]: Math.max(minVal, Number(e.target.value) || 0),
                     }))
                   }
-                  className="w-full min-h-[40px] rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm text-slate-900 tabular-nums"
+                  className="w-full min-h-[max(44px,2.75rem)] rounded-lg border border-slate-300 px-2.5 py-1.5 text-slate-900 tabular-nums"
                 />
               </label>
             ))}
@@ -645,9 +749,9 @@ export function SettingsModal({
             <button
               type="button"
               onClick={() => void handleSaveLimits()}
-              className="min-h-[44px] px-4 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 cursor-pointer"
+              className="min-h-[max(44px,2.75rem)] px-4 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 cursor-pointer"
             >
-              上限設定を保存
+              設定を保存
             </button>
           </div>
         </section>
@@ -681,7 +785,7 @@ export function SettingsModal({
               <button
                 type="button"
                 onClick={() => void handleRequestPersist()}
-                className="min-h-[36px] px-3 py-1 rounded border border-slate-300 bg-white text-xs font-medium text-slate-800 hover:bg-slate-100 cursor-pointer"
+                className="min-h-[max(44px,2.75rem)] px-3 py-1.5 rounded border border-slate-300 bg-white text-xs font-medium text-slate-800 hover:bg-slate-100 cursor-pointer"
               >
                 保護をリクエスト
               </button>
@@ -692,7 +796,7 @@ export function SettingsModal({
             <button
               type="button"
               onClick={() => void handleExportJson()}
-              className="min-h-[44px] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-50 cursor-pointer"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-50 cursor-pointer"
             >
               <Download className="w-4 h-4" />
               <span>全データをJSONエクスポート</span>
@@ -701,7 +805,7 @@ export function SettingsModal({
             <button
               type="button"
               onClick={() => importInputRef.current?.click()}
-              className="min-h-[44px] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-50 cursor-pointer"
+              className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-50 cursor-pointer"
             >
               <Upload className="w-4 h-4" />
               <span>JSONファイルからインポート</span>
@@ -738,53 +842,86 @@ export function SettingsModal({
                 <button
                   type="button"
                   onClick={() => void handleExecuteImport('merge')}
-                  className="min-h-[44px] px-4 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 cursor-pointer"
+                  className="min-h-[max(44px,2.75rem)] px-4 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 cursor-pointer"
                 >
                   既存データに結合する
                 </button>
                 <button
                   type="button"
                   onClick={() => void handleExecuteImport('overwrite')}
-                  className="min-h-[44px] px-4 py-2 rounded-lg bg-red-700 text-white text-xs font-semibold hover:bg-red-800 cursor-pointer"
+                  className="min-h-[max(44px,2.75rem)] px-4 py-2 rounded-lg bg-red-700 text-white text-xs font-semibold hover:bg-red-800 cursor-pointer"
                 >
                   既存データを上書きする
                 </button>
                 <button
                   type="button"
                   onClick={() => setPendingImport(null)}
-                  className="min-h-[44px] px-3 py-2 rounded-lg text-xs text-slate-600 hover:bg-amber-100 cursor-pointer"
+                  className="min-h-[max(44px,2.75rem)] px-3 py-2 rounded-lg text-xs text-slate-600 hover:bg-amber-100 cursor-pointer"
                 >
                   キャンセル
                 </button>
               </div>
             </div>
           )}
+
+          {/* Reset / Delete All Study Data */}
+          <div className="border-t border-slate-100 pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-red-50/50 border border-red-200 rounded-lg p-3">
+              <div className="space-y-0.5 text-xs">
+                <div className="font-semibold text-red-900">学習データの初期化</div>
+                <p className="text-red-800/80">
+                  科目・フォルダ・知識項目・傾向・添削履歴・提案・操作ログをすべて削除します（APIキーと設定は残ります）。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConfirmResetAllOpen(true)}
+                className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-red-300 bg-white text-xs font-semibold text-red-700 hover:bg-red-50 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>全データを削除</span>
+              </button>
+            </div>
+          </div>
         </section>
 
         {/* 7. Operation Logs */}
         <section className="space-y-2 border-t border-slate-200 pt-5">
-          <button
-            type="button"
-            onClick={() => setShowLogs((v) => !v)}
-            className="text-xs font-semibold text-slate-700 hover:text-slate-900 cursor-pointer"
-          >
-            {showLogs
-              ? `操作ログを閉じる（${state.logs.length}件）`
-              : `操作ログを表示する（直近 ${state.logs.length}件）`}
-          </button>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => setShowLogs((v) => !v)}
+              className="min-h-[max(44px,2.75rem)] px-1 text-xs font-semibold text-slate-700 hover:text-slate-900 cursor-pointer"
+            >
+              {showLogs
+                ? `操作ログを閉じる（${state.logs.length}件）`
+                : `操作ログを表示する（${state.logs.length}件）`}
+            </button>
+
+            {showLogs && state.logs.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setConfirmClearLogsOpen(true)}
+                className="min-h-[max(44px,2.75rem)] inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-red-200 bg-white text-xs font-medium text-red-700 hover:bg-red-50 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>操作ログをすべて削除</span>
+              </button>
+            )}
+          </div>
 
           {showLogs && (
-            <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100 text-xs">
+            <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100 text-xs">
               {state.logs.length === 0 ? (
                 <div className="p-3 text-slate-500">まだ操作ログはありません。</div>
               ) : (
-                state.logs.slice(0, 50).map((log) => (
+                state.logs.map((log) => (
                   <div key={log.id} className="px-3 py-2 flex items-baseline justify-between gap-3">
                     <div className="space-x-2">
                       <span className="font-semibold text-slate-800">{log.action}</span>
                       <span className="text-slate-600">{log.detail}</span>
                     </div>
-                    <span className="text-[11px] text-slate-400 font-mono shrink-0 tabular-nums">
+                    <span className="text-[0.75rem] text-slate-400 font-mono shrink-0 tabular-nums">
                       {new Date(log.timestamp).toLocaleString('ja-JP')}
                     </span>
                   </div>
@@ -793,7 +930,77 @@ export function SettingsModal({
             </div>
           )}
         </section>
+
+        {/* Version Info */}
+        <footer className="border-t border-slate-200 pt-3 flex items-center justify-between text-xs text-slate-500 tabular-nums">
+          <span>{APP_FULL_NAME}</span>
+          <span>バージョン: {APP_BUILD_VERSION}</span>
+        </footer>
       </div>
+
+      {/* 1-step confirm for API key deletion */}
+      <ConfirmDeleteFlow
+        open={confirmDeleteKeyOpen}
+        targetLabel="保存されている Gemini APIキー"
+        impactDetails={[
+          'ブラウザの localStorage から APIキーを削除します。',
+          '※ 学習データ（科目・知識項目・傾向・添削履歴）は削除されません。',
+        ]}
+        steps={1}
+        onConfirm={handleDeleteApiKey}
+        onClose={() => setConfirmDeleteKeyOpen(false)}
+      />
+
+      {/* 2-step + keyword confirm for Subject cascade deletion */}
+      <ConfirmDeleteFlow
+        open={Boolean(deleteSubjectTarget)}
+        targetLabel={deleteSubjectTarget ? `科目「${deleteSubjectTarget}」` : ''}
+        impactDetails={
+          deleteSubjectTarget ? previewDeleteSubject(state, deleteSubjectTarget).details : []
+        }
+        steps={2}
+        requireKeyword="削除"
+        onBackupClick={handleExportJson}
+        onConfirm={async () => {
+          if (!deleteSubjectTarget) return;
+          const res = await deleteSubjectCascade(deleteSubjectTarget);
+          if (!res.ok || !res.state) {
+            throw new Error(res.error ?? '科目の削除に失敗しました。');
+          }
+          onStateUpdated(res.state);
+        }}
+        onClose={() => setDeleteSubjectTarget(null)}
+      />
+
+      {/* 2-step confirm for clearing operation logs */}
+      <ConfirmDeleteFlow
+        open={confirmClearLogsOpen}
+        targetLabel={`操作ログ（${state.logs.length}件）`}
+        impactDetails={[
+          `記録されている操作ログ ${state.logs.length}件をすべて削除します。`,
+          '※ 科目・知識項目・傾向・添削履歴は保持されます。',
+        ]}
+        steps={2}
+        onBackupClick={handleExportJson}
+        onConfirm={async () => {
+          const nextState = await clearOperationLogs();
+          onStateUpdated(nextState);
+          setSavedNotice('操作ログをすべて削除しました。');
+        }}
+        onClose={() => setConfirmClearLogsOpen(false)}
+      />
+
+      {/* 2-step + keyword confirm for resetting all study data */}
+      <ConfirmDeleteFlow
+        open={confirmResetAllOpen}
+        targetLabel="すべての学習データ"
+        impactDetails={confirmResetAllOpen ? previewResetAllStudyData(state).details : []}
+        steps={2}
+        requireKeyword="削除"
+        onBackupClick={handleExportJson}
+        onConfirm={handleResetAllData}
+        onClose={() => setConfirmResetAllOpen(false)}
+      />
     </div>
   );
 }

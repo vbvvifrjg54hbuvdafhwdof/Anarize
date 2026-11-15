@@ -4,6 +4,7 @@ import {
   type FunctionDeclaration,
   GoogleGenAI,
   type Part,
+  ThinkingLevel,
   Type,
 } from '@google/genai';
 import type { AnswerAttachment, AppState, ReviewProgressEvent } from '../types.ts';
@@ -58,6 +59,9 @@ export async function testApiKeyConnection(apiKey: string): Promise<{ ok: boolea
     const response = await ai.models.generateContent({
       model: 'gemini-4-hydrogen',
       contents: '接続テストです。「OK」とだけ返してください。',
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      },
     });
     if (response.text) {
       return { ok: true, message: '接続に成功しました。Gemini API が利用可能です。' };
@@ -85,14 +89,14 @@ function buildSystemPrompt(state: AppState): string {
 ■ 作業の手順
 1. 答案から科目を判断する。${subjects} にない科目は勝手に作らず、
    ユーザーに「どの科目に入れますか？」と質問して、返事を待つ。
-2. get_tendencies と get_tree を呼び、過去の傾向と既存の構成を確認する。
+2. 最初に get_tendencies と get_tree を必ず1回の応答で並列にまとめて呼び出し、
+   過去の傾向と既存の構成を確認する（別々のターンに分けず同時に呼ぶ）。
    単元フォルダの中身が必要なときだけ、さらに get_tree や read_file を呼ぶ。
-   独立した呼び出しは1回の応答で並列にまとめて返すこと。
 3. 問題ごとに採点し、誤りの原因を判断する。
-4. 登録する。
+4. 登録する（独立した登録は1回の応答で並列にまとめて呼ぶ）。
    ・知識不足 → save_file
    ・不注意 → record_tendency
-5. 必要なら整理（create_folder / move_item / rename_item / merge_items）。
+5. 必要なら整理（create_folder / move_item / rename_item / merge_items）。独立した操作は並列にまとめて呼ぶ。
 6. 最後に finalize_review を1回だけ呼ぶ。
    ユーザーに見せる添削コメントは、この呼び出しの内容がそのまま表示される。
    ツール呼び出しの外に、添削コメントの文章を書かない。
@@ -129,8 +133,8 @@ function buildSystemPrompt(state: AppState): string {
 
 ■ 知識項目（save_file）のルール
 ・見出しは短く、具体的に書く。例: 「3倍角の公式」「If it were not for 〜」「あいなし」
-・解説は1〜2行で簡潔に。数式は LaTeX 記法で \\( ... \\) のように書く。
-・1回の添削で登録する知識項目は、原因として本質的なものに絞る（最大5件）。
+・解説は簡潔に。数式は LaTeX 記法で \\( ... \\) のように書く。
+・1回の添削で登録する知識項目は、原因として本質的なものに絞る。
 ・登録の前に、get_tree で既存の見出しを確認する。同じ意味の見出しが
   既にあれば、その見出しをそのまま使う（表記ゆれを作らない）。
 ・既存の見出しなら、解説の書き換えはせず、ミス回数が加算される。
@@ -174,11 +178,11 @@ function buildSystemPrompt(state: AppState): string {
 ・過去との関連: get_tendencies の結果に基づき、該当するときだけ一言添える。
   例:「この符号ミスは、数学で直近3回出ています」
 ・ひとこと（note）: 別解、書き方の助言、優先度など、型に収まらないことを
-  3〜4文以内で書く。ここに書いた内容は登録されない。
+  簡潔に書く。ここに書いた内容は登録されない。
 ・問題が複数あるときは、結果と誤りの箇所を問題ごとに繰り返し、
   過去との関連とひとことは全体で1回にまとめる。
 ・該当しない項目は省略する（全問正解なら、結果とひとことだけでよい）。
-・次にやることは、1〜2個に絞る。
+・次にやることを分かりやすく示す。
 ・丁寧だが簡潔に。ユーザーを責めず、事実と次の一手を示す。
 
 ■ してはいけないこと
@@ -237,11 +241,11 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
         },
         heading: {
           type: Type.STRING,
-          description: '項目の見出し。40文字以内。短く具体的に。既存の見出しがあればそのまま使う。',
+          description: '項目の見出し。短く具体的に。既存の見出しがあればそのまま使う。',
         },
         explanation: {
           type: Type.STRING,
-          description: '解説。1〜2行、200文字以内。数式はLaTeX記法で \\( ... \\) と書く。',
+          description: '解説。簡潔に。数式はLaTeX記法で \\( ... \\) と書く。',
         },
       },
       required: ['folder_path', 'heading', 'explanation'],
@@ -276,56 +280,56 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
           type: Type.STRING,
           description: '移動先のフォルダのパス',
         },
-        reason: {
-          type: Type.STRING,
-          description: '移動の理由。60文字以内。提案として保留される場合に、ユーザーへ表示される。',
+          reason: {
+            type: Type.STRING,
+            description: '移動の理由。提案として保留される場合に、ユーザーへ表示される。',
+          },
         },
+        required: ['from_path', 'to_folder_path', 'reason'],
       },
-      required: ['from_path', 'to_folder_path', 'reason'],
     },
-  },
-  {
-    name: 'rename_item',
-    description: '知識項目の見出し、またはフォルダ名を変更する。科目名は変更できない。',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        path: {
-          type: Type.STRING,
-          description: '対象。項目なら「フォルダのパス/見出し」、フォルダならフォルダのパス',
+    {
+      name: 'rename_item',
+      description: '知識項目の見出し、またはフォルダ名を変更する。科目名は変更できない。',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          path: {
+            type: Type.STRING,
+            description: '対象。項目なら「フォルダのパス/見出し」、フォルダならフォルダのパス',
+          },
+          new_name: {
+            type: Type.STRING,
+            description: '新しい名前',
+          },
+          reason: {
+            type: Type.STRING,
+            description: '変更の理由',
+          },
         },
-        new_name: {
-          type: Type.STRING,
-          description: '新しい名前。40文字以内',
-        },
-        reason: {
-          type: Type.STRING,
-          description: '変更の理由。60文字以内',
-        },
+        required: ['path', 'new_name', 'reason'],
       },
-      required: ['path', 'new_name', 'reason'],
     },
-  },
-  {
-    name: 'merge_items',
-    description:
-      '意味が同じ、または非常に近い2つの知識項目を統合する。統合元のミス回数を統合先に合算し、統合元は削除せずに非表示にする（履歴から復元できる）。',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        from_path: {
-          type: Type.STRING,
-          description: '統合元。「フォルダのパス/見出し」',
+    {
+      name: 'merge_items',
+      description:
+        '意味が同じ、または非常に近い2つの知識項目を統合する。統合元のミス回数を統合先に合算し、統合元は削除せずに非表示にする（履歴から復元できる）。',
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          from_path: {
+            type: Type.STRING,
+            description: '統合元。「フォルダのパス/見出し」',
+          },
+          into_path: {
+            type: Type.STRING,
+            description: '統合先。「フォルダのパス/見出し」。こちらの見出しと解説が残る。',
+          },
+          reason: {
+            type: Type.STRING,
+            description: '統合の理由',
+          },
         },
-        into_path: {
-          type: Type.STRING,
-          description: '統合先。「フォルダのパス/見出し」。こちらの見出しと解説が残る。',
-        },
-        reason: {
-          type: Type.STRING,
-          description: '統合の理由。60文字以内',
-        },
-      },
       required: ['from_path', 'into_path', 'reason'],
     },
   },
@@ -356,7 +360,7 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
         },
         new_name: {
           type: Type.STRING,
-          description: '新規作成する傾向名。30文字以内。原因が分かる具体的な名前にする。',
+          description: '新規作成する傾向名。原因が分かる具体的な名前にする。',
         },
         category: {
           type: Type.STRING,
@@ -373,7 +377,7 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
         },
         situation: {
           type: Type.STRING,
-          description: 'どんな場面で起きたかを一言で。60文字以内。',
+          description: 'どんな場面で起きたかを一言で書く。',
         },
       },
       required: ['subject', 'unit', 'situation'],
@@ -441,7 +445,7 @@ const TOOL_DECLARATIONS: FunctionDeclaration[] = [
         },
         note: {
           type: Type.STRING,
-          description: 'ひとこと。別解、書き方の助言、優先度など。3〜4文以内。登録には使われない。',
+          description: 'ひとこと。別解、書き方の助言、優先度など簡潔に。登録には使われない。',
         },
       },
       required: ['subject', 'basis', 'questions'],
@@ -454,6 +458,7 @@ interface ActiveGradingSession {
   contents: Content[];
   tracker: ReviewSessionTracker;
   roundCount: number;
+  startedAt: number;
 }
 
 const activeSessions = new Map<string, ActiveGradingSession>();
@@ -531,6 +536,7 @@ async function runGradingLoop(
     }
 
     session.roundCount += 1;
+    const roundStart = performance.now();
     emit({
       type: 'progress',
       round: session.roundCount,
@@ -546,27 +552,59 @@ async function runGradingLoop(
       config: {
         systemInstruction: buildSystemPrompt(state),
         tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
       },
     });
 
     const collectedParts: Part[] = [];
     const functionCalls: FunctionCall[] = [];
+    const announcedTools = new Set<string>();
     let streamedText = '';
+    let firstChunkLogged = false;
 
     for await (const chunk of stream) {
+      if (!firstChunkLogged) {
+        firstChunkLogged = true;
+        console.info(
+          `[Anarize Timing] Round ${session.roundCount} 最初の応答 (TTFT): ${Math.round(
+            performance.now() - roundStart
+          )}ms`
+        );
+      }
+
       const candidateParts = chunk.candidates?.[0]?.content?.parts;
       if (candidateParts && candidateParts.length > 0) {
         for (const p of candidateParts) {
           collectedParts.push(p);
           if (p.functionCall) {
             functionCalls.push(p.functionCall);
+            const tName = p.functionCall.name ?? '';
+            if (tName && !announcedTools.has(tName)) {
+              announcedTools.add(tName);
+              emit({
+                type: 'progress',
+                round: session.roundCount,
+                message: describeToolAction(tName),
+              });
+            }
           }
         }
       }
       if (chunk.text) {
         streamedText += chunk.text;
+        emit({
+          type: 'stream_text',
+          round: session.roundCount,
+          text: streamedText,
+        });
       }
     }
+
+    console.info(
+      `[Anarize Timing] Round ${session.roundCount} 応答ストリーム完了: ${Math.round(
+        performance.now() - roundStart
+      )}ms (tools: ${functionCalls.map((f) => f.name).join(', ') || 'text-only'})`
+    );
 
     if (collectedParts.length > 0) {
       session.contents.push({ role: 'model', parts: collectedParts });
@@ -592,19 +630,21 @@ async function runGradingLoop(
       return;
     }
 
-    const forceAllowTruncate = session.roundCount >= maxRounds - 1;
+    const toolsStart = performance.now();
     const responseParts: Part[] = [];
 
     for (const fc of functionCalls) {
       const toolName = fc.name ?? '';
       const args = (fc.args ?? {}) as Record<string, unknown>;
-      emit({
-        type: 'progress',
-        round: session.roundCount,
-        message: describeToolAction(toolName),
-      });
+      if (!announcedTools.has(toolName)) {
+        emit({
+          type: 'progress',
+          round: session.roundCount,
+          message: describeToolAction(toolName),
+        });
+      }
 
-      const result = await executeAITool(toolName, args, session.tracker, forceAllowTruncate);
+      const result = await executeAITool(toolName, args, session.tracker);
       responseParts.push({
         functionResponse: {
           id: fc.id,
@@ -614,8 +654,18 @@ async function runGradingLoop(
       });
     }
 
+    console.info(
+      `[Anarize Timing] Round ${session.roundCount} ツール実行 (${functionCalls.length}件): ${Math.round(
+        performance.now() - toolsStart
+      )}ms`
+    );
+
     if (session.tracker.finalizedReview) {
       const review = session.tracker.finalizedReview;
+      const totalMs = Math.round(performance.now() - session.startedAt);
+      console.info(
+        `[Anarize Timing] 添削全体合計: ${totalMs}ms (${session.roundCount}往復)`
+      );
       discardSession(session.sessionId);
       const nextState = await loadState();
       emit({
@@ -646,6 +696,8 @@ export async function startReviewSession(
 ): Promise<void> {
   clearAllSessions();
 
+  const totalStart = performance.now();
+  const prepStart = performance.now();
   const sessionId = `ses_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
   const userParts: Part[] = [];
 
@@ -663,6 +715,12 @@ export async function startReviewSession(
     });
   }
 
+  console.info(
+    `[Anarize Timing] 画像/ファイル前処理 (base64変換, ${attachments.length}件): ${Math.round(
+      performance.now() - prepStart
+    )}ms`
+  );
+
   userParts.push({
     text: memo?.trim()
       ? `この答案を添削してください。\n【ユーザーからのメモ】\n${memo.trim()}`
@@ -674,6 +732,7 @@ export async function startReviewSession(
     contents: [{ role: 'user', parts: userParts }],
     tracker: createSessionTracker(),
     roundCount: 0,
+    startedAt: totalStart,
   };
 
   activeSessions.set(sessionId, session);
