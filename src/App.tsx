@@ -72,10 +72,32 @@ export default function App() {
   const [focusedTendency, setFocusedTendency] = useState<string | null>(null);
 
   const isOnline = useOnlineStatus();
+  const [swRegistration, setSwRegistration] = useState<ServiceWorkerRegistration | undefined>(
+    undefined
+  );
   const {
     needRefresh: [needRefresh],
     updateServiceWorker,
-  } = useRegisterSW();
+  } = useRegisterSW({
+    immediate: true,
+    onRegisteredSW(_swUrl, registration) {
+      if (registration) {
+        setSwRegistration(registration);
+        void registration.update().catch(() => undefined);
+      }
+    },
+  });
+
+  useEffect(() => {
+    if (!swRegistration) return;
+    const checkUpdate = () => {
+      if (document.visibilityState === 'visible') {
+        void swRegistration.update().catch(() => undefined);
+      }
+    };
+    document.addEventListener('visibilitychange', checkUpdate);
+    return () => document.removeEventListener('visibilitychange', checkUpdate);
+  }, [swRegistration]);
 
   const navigateTo = useCallback((tab: ActiveTab) => {
     setActiveTab(tab);

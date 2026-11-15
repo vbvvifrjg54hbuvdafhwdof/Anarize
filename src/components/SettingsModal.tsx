@@ -12,6 +12,7 @@ import {
   KeyRound,
   Loader2,
   Plus,
+  RefreshCw,
   ShieldAlert,
   Trash2,
   Upload,
@@ -20,6 +21,7 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { APP_FULL_NAME, APP_NAME } from '../config.ts';
 import { testApiKeyConnection } from '../services/geminiClient.ts';
+import { clearAppCachesAndReload } from '../utils/cacheRecovery.ts';
 import {
   addSubject,
   checkStoragePersisted,
@@ -445,10 +447,28 @@ export function SettingsModal({
           </div>
         </section>
 
-        {/* 2. PWA Install */}
-        <section className="space-y-2 border-t border-slate-200 pt-5">
-          <h3 className="text-sm font-semibold text-slate-900">アプリインストール（PWA）</h3>
+        {/* 2. PWA Install & Cache Maintenance */}
+        <section className="space-y-3 border-t border-slate-200 pt-5">
+          <h3 className="text-sm font-semibold text-slate-900">アプリインストール（PWA）・更新</h3>
           <PWAInstallSection />
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-0.5 text-xs">
+              <div className="font-semibold text-slate-900">
+                古い画面・キャッシュが表示される場合
+              </div>
+              <p className="text-slate-600">
+                Service Worker と画面キャッシュのみを破棄して最新版を読み込みます（APIキーと学習データは消えません）。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void clearAppCachesAndReload()}
+              className="min-h-[40px] inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-800 hover:bg-slate-100 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>キャッシュを最新に更新</span>
+            </button>
+          </div>
         </section>
 
         {/* 3. Organization Mode */}

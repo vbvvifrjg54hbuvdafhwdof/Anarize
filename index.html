@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <title>Anarize（アナライズ） — 大学受験 答案添削・弱点分析</title>
     <meta
       name="description"
@@ -25,7 +28,16 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   </head>
   <body class="bg-slate-50 text-slate-900 antialiased selection:bg-sky-100 selection:text-sky-900">
-    <div id="root"></div>
+    <div id="root">
+      <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;color:#475569;font-size:14px;">
+        Anarize を読み込んでいます...
+      </div>
+    </div>
+    <noscript>
+      <div style="padding:24px;text-align:center;font-family:system-ui,sans-serif;">
+        Anarize を利用するには JavaScript を有効にしてください。
+      </div>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
