@@ -10,6 +10,8 @@ import type {
   TendencyCategory,
 } from '../types.ts';
 import {
+  appendLog,
+  applyAutoHideTendenciesForSubject,
   ensureFolderExistsInState,
   generateId,
   getTodayJST,
@@ -442,6 +444,7 @@ export async function resolveProposal(
   if (action === 'reject') {
     proposal.status = 'rejected';
     proposal.resolved_at = now;
+    appendLog(state, '提案却下', proposal.summary);
     await saveState(state);
     return { ok: true, state };
   }
@@ -461,12 +464,14 @@ export async function resolveProposal(
     proposal.status = 'invalidated';
     proposal.invalid_reason = execResult.message ?? '対象の状態が既に変更されていたため実行できませんでした。';
     proposal.resolved_at = now;
+    appendLog(state, '提案無効化', `${proposal.summary} (${proposal.invalid_reason})`);
     await saveState(state);
     return { ok: false, error: proposal.invalid_reason, state };
   }
 
   proposal.status = 'approved';
   proposal.resolved_at = now;
+  appendLog(state, '提案承認', proposal.summary);
   await saveState(state);
   return { ok: true, state };
 }
@@ -1106,6 +1111,8 @@ export async function executeAITool(
       }
 
       state.reviews.unshift(review);
+      applyAutoHideTendenciesForSubject(state, subject);
+      appendLog(state, '添削完了', `${subject} (${registrationLine})`);
       await saveState(state);
       tracker.finalizedReview = review;
 

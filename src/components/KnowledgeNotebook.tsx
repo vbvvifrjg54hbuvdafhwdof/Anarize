@@ -18,6 +18,10 @@ interface KnowledgeNotebookProps {
   focusedQuery?: { heading: string; subject: string } | null;
   onClearFocusedQuery?: () => void;
   onStateUpdated: (state: AppState) => void;
+  externalSubject?: string;
+  externalFolder?: string;
+  onSelectSubjectAndFolder?: (subject: string, folder: string) => void;
+  hideFolderSidebar?: boolean;
 }
 
 export function KnowledgeNotebook({
@@ -25,13 +29,29 @@ export function KnowledgeNotebook({
   focusedQuery,
   onClearFocusedQuery,
   onStateUpdated,
+  externalSubject,
+  externalFolder,
+  onSelectSubjectAndFolder,
+  hideFolderSidebar = false,
 }: KnowledgeNotebookProps) {
-  const [selectedSubject, setSelectedSubject] = useState<string>(
+  const [internalSubject, setInternalSubject] = useState<string>(
     focusedQuery?.subject && state.subjects.includes(focusedQuery.subject)
       ? focusedQuery.subject
       : state.subjects[0] ?? ''
   );
-  const [selectedFolder, setSelectedFolder] = useState<string>('ALL');
+  const [internalFolder, setInternalFolder] = useState<string>('ALL');
+  const selectedSubject = externalSubject ?? internalSubject;
+  const selectedFolder = externalFolder ?? internalFolder;
+
+  const setSelectedSubject = (sub: string) => {
+    setInternalSubject(sub);
+    onSelectSubjectAndFolder?.(sub, 'ALL');
+  };
+  const setSelectedFolder = (folder: string) => {
+    setInternalFolder(folder);
+    onSelectSubjectAndFolder?.(selectedSubject, folder);
+  };
+
   const [searchText, setSearchText] = useState<string>(focusedQuery?.heading ?? '');
   const [filterMode, setFilterMode] = useState<'all' | 'unverified' | 'hidden'>('all');
 
@@ -47,20 +67,23 @@ export function KnowledgeNotebook({
 
   useEffect(() => {
     if (focusedQuery) {
-      if (state.subjects.includes(focusedQuery.subject)) {
-        setSelectedSubject(focusedQuery.subject);
-      }
-      setSelectedFolder('ALL');
+      const targetSub = state.subjects.includes(focusedQuery.subject)
+        ? focusedQuery.subject
+        : selectedSubject;
+      setInternalSubject(targetSub);
+      setInternalFolder('ALL');
+      onSelectSubjectAndFolder?.(targetSub, 'ALL');
       setSearchText(focusedQuery.heading);
       setFilterMode('all');
       onClearFocusedQuery?.();
     }
-  }, [focusedQuery, state.subjects, onClearFocusedQuery]);
+  }, [focusedQuery, state.subjects, onClearFocusedQuery, onSelectSubjectAndFolder, selectedSubject]);
 
   useEffect(() => {
     if (!state.subjects.includes(selectedSubject)) {
-      setSelectedSubject(state.subjects[0] ?? '');
-      setSelectedFolder('ALL');
+      const fallback = state.subjects[0] ?? '';
+      setInternalSubject(fallback);
+      setInternalFolder('ALL');
     }
   }, [state.subjects, selectedSubject]);
 
@@ -270,63 +293,65 @@ export function KnowledgeNotebook({
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        <aside className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-4 space-y-2">
-          <div className="text-xs font-semibold text-slate-500 px-2 pb-1">
-            {selectedSubject} の単元構成（最大2段）
-          </div>
-          <button
-            type="button"
-            onClick={() => setSelectedFolder('ALL')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
-              selectedFolder === 'ALL'
-                ? 'bg-sky-50 text-sky-900 font-semibold'
-                : 'text-slate-700 hover:bg-slate-50'
-            }`}
-          >
-            <span>すべての単元</span>
-            <span className="text-xs text-slate-500 tabular-nums">
-              {countForFolder(selectedSubject)}
-            </span>
-          </button>
+        {!hideFolderSidebar && (
+          <aside className="lg:col-span-4 bg-white border border-slate-200 rounded-xl p-4 space-y-2">
+            <div className="text-xs font-semibold text-slate-500 px-2 pb-1">
+              {selectedSubject} の単元構成（最大2段）
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedFolder('ALL')}
+              className={`w-full min-h-[42px] flex items-center justify-between px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer ${
+                selectedFolder === 'ALL'
+                  ? 'bg-blue-50 text-blue-950 font-semibold'
+                  : 'text-slate-700 hover:bg-slate-50'
+              }`}
+            >
+              <span>すべての単元</span>
+              <span className="text-xs text-slate-500 tabular-nums">
+                {countForFolder(selectedSubject)}
+              </span>
+            </button>
 
-          <div className="space-y-1">
-            {subjectFolders.map((folderPath) => {
-              const parts = folderPath.split('/');
-              const isDepth2 = parts.length === 3;
-              const name = parts[parts.length - 1];
-              const active = selectedFolder === folderPath;
-              return (
-                <button
-                  key={folderPath}
-                  type="button"
-                  onClick={() => setSelectedFolder(folderPath)}
-                  className={`w-full flex items-center justify-between py-2 pr-3 rounded-lg text-sm transition-colors cursor-pointer ${
-                    isDepth2 ? 'pl-7' : 'pl-3'
-                  } ${
-                    active
-                      ? 'bg-sky-50 text-sky-900 font-semibold'
-                      : 'text-slate-700 hover:bg-slate-50'
-                  }`}
-                >
-                  <span className="flex items-center gap-2 min-w-0">
-                    <Folder className="w-4 h-4 text-slate-400 shrink-0" />
-                    <span className="truncate">{name}</span>
-                  </span>
-                  <span className="text-xs text-slate-500 tabular-nums shrink-0">
-                    {countForFolder(folderPath)}
-                  </span>
-                </button>
-              );
-            })}
-            {subjectFolders.length === 0 && (
-              <p className="text-xs text-slate-500 px-3 py-2">
-                単元フォルダはまだありません。答案を添削すると自動で作成されます。
-              </p>
-            )}
-          </div>
-        </aside>
+            <div className="space-y-1">
+              {subjectFolders.map((folderPath) => {
+                const parts = folderPath.split('/');
+                const isDepth2 = parts.length === 3;
+                const name = parts[parts.length - 1];
+                const active = selectedFolder === folderPath;
+                return (
+                  <button
+                    key={folderPath}
+                    type="button"
+                    onClick={() => setSelectedFolder(folderPath)}
+                    className={`w-full min-h-[42px] flex items-center justify-between py-2 pr-3 rounded-lg text-sm transition-colors cursor-pointer ${
+                      isDepth2 ? 'pl-7' : 'pl-3'
+                    } ${
+                      active
+                        ? 'bg-blue-50 text-blue-950 font-semibold'
+                        : 'text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <Folder className="w-4 h-4 text-slate-400 shrink-0" />
+                      <span className="truncate">{name}</span>
+                    </span>
+                    <span className="text-xs text-slate-500 tabular-nums shrink-0">
+                      {countForFolder(folderPath)}
+                    </span>
+                  </button>
+                );
+              })}
+              {subjectFolders.length === 0 && (
+                <p className="text-xs text-slate-500 px-3 py-2">
+                  単元フォルダはまだありません。答案を添削すると自動で作成されます。
+                </p>
+              )}
+            </div>
+          </aside>
+        )}
 
-        <section className="lg:col-span-8 space-y-4">
+        <section className={`${hideFolderSidebar ? 'lg:col-span-12' : 'lg:col-span-8'} space-y-4`}>
           <div className="bg-white border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3">
             <div className="relative flex-1 min-w-[200px]">
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />

@@ -9,6 +9,7 @@ import {
   ShieldAlert,
   Trash2,
   Upload,
+  WifiOff,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -17,21 +18,24 @@ import {
   replyToReviewSession,
   startReviewSession,
 } from '../services/geminiClient.ts';
-import {
-  captureVideoFrameToJpeg,
-  compressImageFileToJpeg,
-} from '../utils/imageProcessor.ts';
 import type {
   AnswerAttachment,
   AppState,
   ReviewProgressEvent,
   ReviewRecord,
 } from '../types.ts';
+import {
+  captureVideoFrameToJpeg,
+  compressImageFileToJpeg,
+  countPdfPages,
+} from '../utils/imageProcessor.ts';
 import { ReviewSheet } from './ReviewSheet.tsx';
 
 interface GradingDeskProps {
   subjects: string[];
   hasApiKey: boolean;
+  maxPdfPages: number;
+  isOnline: boolean;
   onOpenSettings: () => void;
   onStateUpdated: (state: AppState) => void;
   onJumpToKnowledge: (heading: string, subject: string) => void;
@@ -50,6 +54,8 @@ function detectMobileDevice(): boolean {
 export function GradingDesk({
   subjects,
   hasApiKey,
+  maxPdfPages,
+  isOnline,
   onOpenSettings,
   onStateUpdated,
   onJumpToKnowledge,
@@ -69,7 +75,7 @@ export function GradingDesk({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Mobile native camera input
+  // Mobile native camera & file inputs
   const mobileCameraInputRef = useRef<HTMLInputElement | null>(null);
   const mobileRetakeInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -184,10 +190,19 @@ export function GradingDesk({
     setErrorMessage(null);
     discardPendingClarification();
 
-    const pdfFile = fileArray.find((f) => f.type === 'application/pdf');
+    const pdfFile = fileArray.find(
+      (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name)
+    );
     if (pdfFile) {
       if (pdfFile.size > 20 * 1024 * 1024) {
         setErrorMessage('PDFファイルサイズは 20MB 以下にしてください。');
+        return;
+      }
+      const pageCount = await countPdfPages(pdfFile);
+      if (pageCount > maxPdfPages) {
+        setErrorMessage(
+          `このPDFは約${pageCount}ページあります（現在の上限: ${maxPdfPages}ページ）。答案を分割して送信するか、設定画面からページ上限を変更してください。`
+        );
         return;
       }
       clearAllAttachments();
@@ -200,12 +215,15 @@ export function GradingDesk({
           mimeType: 'application/pdf',
           blob: pdfFile,
           previewUrl: url,
+          pageCount,
         },
       ]);
       return;
     }
 
-    const imageFiles = fileArray.filter((f) => f.type.startsWith('image/'));
+    const imageFiles = fileArray.filter(
+      (f) => f.type.startsWith('image/') || /\.(heic|heif|jpe?g|png|webp)$/i.test(f.name)
+    );
     if (imageFiles.length === 0) {
       setErrorMessage('画像（JPG / PNG / WebP）または PDF ファイルを選択してください。');
       return;
@@ -231,7 +249,6 @@ export function GradingDesk({
 
       setAttachments((prev) => {
         const onlyImages = prev.filter((a) => a.kind === 'image');
-        // Revoke any PDF preview if switching to images
         prev.filter((a) => a.kind === 'pdf').forEach((a) => URL.revokeObjectURL(a.previewUrl));
 
         if (replaceIndex !== null && replaceIndex >= 0 && replaceIndex < onlyImages.length) {
@@ -262,7 +279,7 @@ export function GradingDesk({
       const item: AnswerAttachment = {
         id: `cam_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
         kind: 'image',
-        name: `カメラ撮影.jpg`,
+        name: 'カメラ撮影.jpg',
         mimeType: 'image/jpeg',
         blob: captured.blob,
         previewUrl: captured.previewUrl,
@@ -313,64 +330,64 @@ export function GradingDesk({
     }
   };
 
-  const handleEvent = (event: ReviewProgressEvent) => {
-    if (event.type === 'progress' && event.message) {
-      setProgressSteps((prev) =>
-        prev[prev.length - 1] === event.message ? prev : [...prev, event.message!]
-      );
-    } else if (event.type === 'clarification' && event.sessionId && event.message) {
-      setClarification({
-        sessionId: event.sessionId,
-        question: event.message,
-      });
-      setIsGrading(false);
-    } else if (event.type === 'completed' && event.review) {
-      setLatestReview(event.review);
-      if (event.state) onStateUpdated(event.state);
-      setClarification(null);
-      setReplyText('');
-      setMemo('');
-      setIsGrading(false);
-    } else if (event.type === 'error') {
-      setErrorMessage(event.message ?? '添削中にエラーが発生しました。');
-      setClarification(null);
-      setIsGrading(false);
-    }
-  };
+  const handleEvent = useCallback(
+    (event: ReviewProgressEvent) => {
+      if (event.type === 'progress' && event.message) {
+        setProgressSteps((prev) =>
+          prev[prev.length - 1] === event.message ? prev : [...prev, event.message!]
+        );
+      } else if (event.type === 'clarification' && event.sessionId && event.message) {
+        setClarification({
+          sessionId: event.sessionId,
+          question: event.message,
+        });
+        setIsGrading(false);
+      } else if (event.type === 'completed' && event.review) {
+        setLatestReview(event.review);
+        if (event.state) onStateUpdated(event.state);
+        setClarification(null);
+        setReplyText('');
+        setMemo('');
+        setIsGrading(false);
+        // Discard answer images only once grading succeeds
+        clearAllAttachments();
+      } else if (event.type === 'error') {
+        // Retain attachments on error so user can retry immediately
+        setErrorMessage(event.message ?? '添削中にエラーが発生しました。');
+        setClarification(null);
+        setIsGrading(false);
+      }
+    },
+    [clearAllAttachments, onStateUpdated]
+  );
 
   const handleStartReview = async () => {
     if (attachments.length === 0 || isGrading) return;
+    if (!isOnline || !navigator.onLine) {
+      setErrorMessage('通信できません。接続を確認して再試行してください。');
+      return;
+    }
     if (!hasApiKey) {
-      setErrorMessage('Gemini APIキーが未設定です。右上の「環境設定」からキーを設定してください。');
+      setErrorMessage('Gemini APIキーが未設定です。設定画面からAPIキーを入力してください。');
       return;
     }
 
-    const toSend = [...attachments];
-    const memoText = memo.trim() || undefined;
-
-    // Stop camera & immediately discard answer images from client UI state upon submission
     stopCameraStream();
-    setAttachments([]);
-    setRetakeTargetIndex(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-    if (mobileCameraInputRef.current) mobileCameraInputRef.current.value = '';
-
     setIsGrading(true);
     setErrorMessage(null);
     setProgressSteps(['答案を圧縮済みデータとして送信しています...']);
     setClarification(null);
     setLatestReview(null);
 
-    try {
-      await startReviewSession(toSend, memoText, handleEvent);
-    } finally {
-      // Ensure all temporary preview URLs are revoked after transmission
-      toSend.forEach((a) => URL.revokeObjectURL(a.previewUrl));
-    }
+    await startReviewSession(attachments, memo.trim() || undefined, handleEvent);
   };
 
   const handleSendClarificationReply = async () => {
     if (!clarification || !replyText.trim() || isGrading) return;
+    if (!isOnline || !navigator.onLine) {
+      setErrorMessage('通信できません。接続を確認して再試行してください。');
+      return;
+    }
     const sessionId = clarification.sessionId;
     const answer = replyText.trim();
     setIsGrading(true);
@@ -384,14 +401,14 @@ export function GradingDesk({
   const imageAttachments = attachments.filter((a) => a.kind === 'image');
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-      {/* Left Zone: Answer Input (File OR Camera) */}
-      <section className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+    <div className="space-y-5">
+      {/* Answer Input Card */}
+      <section className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="text-base font-semibold text-slate-900">答案の提出</h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              複数ページ撮影・画像縮小（長辺1600px JPEG）対応
+              複数ページ撮影・長辺1600px JPEG自動圧縮・PDF（最大{maxPdfPages}ページ）対応
             </p>
           </div>
 
@@ -401,8 +418,9 @@ export function GradingDesk({
               onClick={() => {
                 clearAllAttachments();
                 clearAllSessions();
+                setErrorMessage(null);
               }}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-red-700 hover:bg-red-50 rounded-md transition-colors cursor-pointer"
+              className="min-h-[40px] inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-red-700 hover:bg-red-50 rounded-md transition-colors cursor-pointer"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>すべて破棄</span>
@@ -410,16 +428,25 @@ export function GradingDesk({
           )}
         </div>
 
+        {!isOnline && (
+          <div className="bg-slate-100 border border-slate-300 rounded-lg p-3 flex items-center gap-2 text-xs text-slate-800">
+            <WifiOff className="w-4 h-4 text-slate-600 shrink-0" />
+            <span>
+              現在オフラインです。過去のノート・履歴の閲覧やPDF/Anki出力は可能ですが、新しい答案の添削にはインターネット接続が必要です。
+            </span>
+          </div>
+        )}
+
         {!hasApiKey && (
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-center justify-between gap-3 text-xs text-amber-950">
             <div className="flex items-center gap-2">
               <KeyRound className="w-4 h-4 text-amber-700 shrink-0" />
-              <span>添削にはご自身の Gemini APIキー が必要です</span>
+              <span>添削の実行にはご自身の Gemini APIキー が必要です</span>
             </div>
             <button
               type="button"
               onClick={onOpenSettings}
-              className="px-2.5 py-1 rounded bg-amber-800 text-white font-medium hover:bg-amber-900 cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[40px] px-3 py-1.5 rounded bg-amber-800 text-white font-medium hover:bg-amber-900 cursor-pointer whitespace-nowrap shrink-0"
             >
               設定を開く
             </button>
@@ -432,26 +459,26 @@ export function GradingDesk({
             type="button"
             disabled={isGrading}
             onClick={() => setInputMode('file')}
-            className={`inline-flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+            className={`min-h-[44px] inline-flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
               inputMode === 'file'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Upload className="w-3.5 h-3.5" />
+            <Upload className="w-4 h-4" />
             <span>ファイルから選ぶ</span>
           </button>
           <button
             type="button"
             disabled={isGrading}
             onClick={() => setInputMode('camera')}
-            className={`inline-flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
+            className={`min-h-[44px] inline-flex items-center justify-center gap-1.5 py-2 rounded-md text-xs font-semibold transition-colors cursor-pointer ${
               inputMode === 'camera'
                 ? 'bg-white text-slate-900 shadow-sm'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Camera className="w-3.5 h-3.5" />
+            <Camera className="w-4 h-4" />
             <span>カメラで撮影</span>
           </button>
         </div>
@@ -477,7 +504,7 @@ export function GradingDesk({
             }}
             className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors cursor-pointer ${
               isDragging
-                ? 'border-sky-600 bg-sky-50'
+                ? 'border-blue-800 bg-blue-50'
                 : 'border-slate-300 hover:border-slate-400 bg-slate-50/60'
             }`}
           >
@@ -498,7 +525,7 @@ export function GradingDesk({
           <div className="space-y-3">
             {isMobile ? (
               <div className="border border-slate-200 rounded-lg p-5 bg-slate-50 text-center space-y-3">
-                <Camera className="w-8 h-8 text-sky-700 mx-auto" />
+                <Camera className="w-8 h-8 text-blue-900 mx-auto" />
                 <div className="space-y-1">
                   <p className="text-sm font-semibold text-slate-900">背面カメラで撮影（スマホ）</p>
                   <p className="text-xs text-slate-500">
@@ -508,7 +535,7 @@ export function GradingDesk({
                 <button
                   type="button"
                   onClick={() => mobileCameraInputRef.current?.click()}
-                  className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg bg-sky-700 text-white text-sm font-semibold hover:bg-sky-800 cursor-pointer"
+                  className="min-h-[44px] inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-lg bg-blue-900 text-white text-sm font-semibold hover:bg-blue-950 cursor-pointer"
                 >
                   <Camera className="w-4 h-4" />
                   <span>カメラを起動して撮影</span>
@@ -521,21 +548,21 @@ export function GradingDesk({
                   <button
                     type="button"
                     onClick={() => setInputMode('file')}
-                    className="px-3.5 py-2 rounded-lg bg-slate-900 text-white font-semibold hover:bg-slate-800 cursor-pointer"
+                    className="min-h-[44px] px-4 py-2 rounded-lg bg-slate-900 text-white font-semibold hover:bg-slate-800 cursor-pointer"
                   >
                     ファイルから選ぶへ移動
                   </button>
                   <button
                     type="button"
                     onClick={() => void startPCCamera()}
-                    className="px-3.5 py-2 rounded-lg border border-amber-300 bg-white text-amber-900 font-medium hover:bg-amber-100 cursor-pointer"
+                    className="min-h-[44px] px-4 py-2 rounded-lg border border-amber-300 bg-white text-amber-900 font-medium hover:bg-amber-100 cursor-pointer"
                   >
                     カメラを再試行
                   </button>
                 </div>
               </div>
             ) : (
-              <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-950 space-y-0">
+              <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-950">
                 <div className="relative aspect-video bg-slate-900 flex items-center justify-center">
                   <video
                     ref={videoRef}
@@ -561,7 +588,7 @@ export function GradingDesk({
                       <button
                         type="button"
                         onClick={() => setRetakeTargetIndex(null)}
-                        className="px-3 py-1.5 rounded-lg text-xs text-slate-600 hover:bg-slate-100 cursor-pointer"
+                        className="min-h-[44px] px-3 py-1.5 rounded-lg text-xs text-slate-600 hover:bg-slate-100 cursor-pointer"
                       >
                         撮り直し中止
                       </button>
@@ -570,9 +597,9 @@ export function GradingDesk({
                       type="button"
                       disabled={!cameraReady || isCompressing}
                       onClick={() => void handlePCCapture()}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-sky-700 text-white text-xs font-semibold hover:bg-sky-800 disabled:bg-slate-300 cursor-pointer"
+                      className="min-h-[44px] inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-900 text-white text-xs font-semibold hover:bg-blue-950 disabled:bg-slate-300 cursor-pointer"
                     >
-                      <Camera className="w-3.5 h-3.5" />
+                      <Camera className="w-4 h-4" />
                       <span>
                         {retakeTargetIndex !== null ? 'この写真で差し替える' : '撮影する'}
                       </span>
@@ -622,7 +649,7 @@ export function GradingDesk({
 
         {isCompressing && (
           <div className="flex items-center gap-2 text-xs text-slate-600">
-            <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-700" />
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-900" />
             <span>画像を長辺1600pxのJPEGに最適化しています...</span>
           </div>
         )}
@@ -630,15 +657,21 @@ export function GradingDesk({
         {/* Thumbnails / PDF Preview */}
         {pdfAttachment && (
           <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-50">
-            <div className="px-3 py-2 bg-white border-b border-slate-200 flex items-center justify-between text-xs">
+            <div className="px-3 py-2 bg-white border-b border-slate-200 flex items-center justify-between text-xs gap-2">
               <span className="flex items-center gap-2 font-medium text-slate-700 truncate">
                 <FileText className="w-4 h-4 text-slate-500 shrink-0" />
                 <span className="truncate">{pdfAttachment.name}</span>
+                {pdfAttachment.pageCount && (
+                  <span className="text-slate-500 shrink-0 tabular-nums">
+                    ({pdfAttachment.pageCount}ページ)
+                  </span>
+                )}
               </span>
               <button
                 type="button"
+                disabled={isGrading}
                 onClick={() => handleRemoveAttachment(0)}
-                className="text-slate-500 hover:text-red-700 cursor-pointer shrink-0"
+                className="min-h-[36px] px-2 text-slate-500 hover:text-red-700 cursor-pointer shrink-0 disabled:opacity-40"
               >
                 削除
               </button>
@@ -646,7 +679,7 @@ export function GradingDesk({
             <iframe
               src={pdfAttachment.previewUrl}
               title="答案PDFプレビュー"
-              className="w-full h-[260px] bg-white"
+              className="w-full h-[240px] bg-white"
             />
           </div>
         )}
@@ -661,7 +694,9 @@ export function GradingDesk({
                 <div
                   key={img.id}
                   className={`border rounded-lg overflow-hidden bg-slate-50 ${
-                    retakeTargetIndex === idx ? 'border-sky-600 ring-2 ring-sky-200' : 'border-slate-200'
+                    retakeTargetIndex === idx
+                      ? 'border-blue-800 ring-2 ring-blue-200'
+                      : 'border-slate-200'
                   }`}
                 >
                   <div className="aspect-[4/3] bg-slate-100 overflow-hidden">
@@ -681,16 +716,18 @@ export function GradingDesk({
                     <div className="flex items-center justify-between gap-1 text-[11px]">
                       <button
                         type="button"
+                        disabled={isGrading}
                         onClick={() => handleTriggerRetake(idx)}
-                        className="inline-flex items-center gap-1 text-sky-700 hover:text-sky-900 font-medium cursor-pointer"
+                        className="min-h-[36px] inline-flex items-center gap-1 text-blue-900 hover:underline font-medium cursor-pointer disabled:opacity-40"
                       >
                         <RefreshCw className="w-3 h-3" />
                         <span>撮り直し</span>
                       </button>
                       <button
                         type="button"
+                        disabled={isGrading}
                         onClick={() => handleRemoveAttachment(idx)}
-                        className="inline-flex items-center gap-1 text-slate-500 hover:text-red-700 cursor-pointer"
+                        className="min-h-[36px] inline-flex items-center gap-1 text-slate-500 hover:text-red-700 cursor-pointer disabled:opacity-40"
                       >
                         <Trash2 className="w-3 h-3" />
                         <span>削除</span>
@@ -705,7 +742,7 @@ export function GradingDesk({
 
         {/* Memo + Privacy Reminder + Send CTA */}
         {attachments.length > 0 && (
-          <div className="space-y-3 pt-1 border-t border-slate-100">
+          <div className="space-y-3 pt-2 border-t border-slate-100">
             <div>
               <label htmlFor="answer-memo" className="block text-xs font-medium text-slate-700 mb-1">
                 チューターへの補足メモ（任意）
@@ -717,28 +754,30 @@ export function GradingDesk({
                 onChange={(e) => setMemo(e.target.value)}
                 disabled={isGrading}
                 placeholder="例: 大問2の(1)と(2)を見てください。模範解答は手元にありません。"
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-600 focus:border-transparent disabled:bg-slate-100"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-900 focus:border-transparent disabled:bg-slate-100"
               />
             </div>
 
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 flex items-center gap-2 text-xs text-amber-900">
               <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0" />
-              <span className="font-medium">氏名欄が写っていないか確認してください</span>
+              <span className="font-medium">氏名欄や学校名が写っていないか確認してください</span>
             </div>
 
             <button
               type="button"
               onClick={() => void handleStartReview()}
               disabled={isGrading || isCompressing || Boolean(clarification)}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-sky-700 text-white text-sm font-semibold hover:bg-sky-800 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors cursor-pointer"
+              className="w-full min-h-[48px] inline-flex items-center justify-center gap-2 px-4 py-3 rounded-lg bg-blue-900 text-white text-sm font-semibold hover:bg-blue-950 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors cursor-pointer"
             >
               {isGrading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span>添削を実行中...</span>
                 </>
+              ) : errorMessage ? (
+                <span>同じ答案で再試行する（完了後に画像は自動破棄）</span>
               ) : (
-                <span>添削を開始する（送信後に画像は自動破棄）</span>
+                <span>添削を開始する（完了後に画像は自動破棄）</span>
               )}
             </button>
           </div>
@@ -763,7 +802,7 @@ export function GradingDesk({
                   key={sub}
                   type="button"
                   onClick={() => setReplyText(sub)}
-                  className="px-2.5 py-1 text-xs font-medium bg-white border border-amber-300 text-slate-700 hover:bg-amber-100 rounded-md cursor-pointer"
+                  className="min-h-[36px] px-3 py-1 text-xs font-medium bg-white border border-amber-300 text-slate-700 hover:bg-amber-100 rounded-md cursor-pointer"
                 >
                   {sub}
                 </button>
@@ -782,13 +821,13 @@ export function GradingDesk({
                   }
                 }}
                 placeholder="回答を入力（例: 数学 / 覚えていなかった）"
-                className="flex-1 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-600"
+                className="flex-1 min-h-[44px] rounded-md border border-amber-300 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-600"
               />
               <button
                 type="button"
                 onClick={() => void handleSendClarificationReply()}
                 disabled={!replyText.trim() || isGrading}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-amber-700 text-white text-sm font-medium hover:bg-amber-800 disabled:bg-slate-300 cursor-pointer whitespace-nowrap shrink-0"
+                className="min-h-[44px] inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-amber-700 text-white text-sm font-medium hover:bg-amber-800 disabled:bg-slate-300 cursor-pointer whitespace-nowrap shrink-0"
               >
                 <Send className="w-3.5 h-3.5" />
                 <span>回答する</span>
@@ -804,12 +843,12 @@ export function GradingDesk({
         )}
       </section>
 
-      {/* Right Zone: Live Progress / Structured Review Result */}
-      <section className="lg:col-span-7 space-y-4">
+      {/* Live Progress / Structured Review Result */}
+      <section className="space-y-4">
         {isGrading && (
-          <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+          <div className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-4">
             <div className="flex items-center gap-3">
-              <Loader2 className="w-5 h-5 text-sky-700 animate-spin shrink-0" />
+              <Loader2 className="w-5 h-5 text-blue-900 animate-spin shrink-0" />
               <h2 className="text-base font-semibold text-slate-900">答案を添削しています</h2>
             </div>
             <ul className="space-y-2 border-t border-slate-100 pt-3">
@@ -834,30 +873,30 @@ export function GradingDesk({
         )}
 
         {!isGrading && !latestReview && (
-          <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
+          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
             <div>
-              <h2 className="text-base font-semibold text-slate-900">添削の仕組み</h2>
-              <p className="text-sm text-slate-600 mt-1 leading-relaxed">
-                答案を送信すると、チューターが過去の傾向と既存ノートを照合したうえで、誤りの原因を2つに切り分けて記録します。データはすべて端末内の IndexedDB に保存されます。
+              <h3 className="text-sm font-semibold text-slate-900">添削の仕組み</h3>
+              <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                答案を送信すると、チューターが過去の傾向と既存ノートを照合したうえで、誤りの原因を「知識不足」と「不注意」に切り分けて端末内の IndexedDB に記録します。
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1">
-              <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-1.5">
-                <div className="text-sm font-semibold text-slate-900">知識不足 → 知識ノート</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 space-y-1">
+                <div className="text-xs font-semibold text-slate-900">知識不足 → 知識ノート</div>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  公式・構文・単語などを覚えていなかった場合は、教科書の単元フォルダごとに簡潔な解説付きで蓄積します。同じ項目を再び間違えるとミス回数のみを加算します。
+                  公式・構文・単語などを覚えていなかった場合は単元フォルダごとに蓄積し、同じ項目の再誤答時はミス回数を加算します。
                 </p>
               </div>
-              <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 space-y-1.5">
-                <div className="text-sm font-semibold text-slate-900">不注意 → ミスの傾向</div>
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3.5 space-y-1">
+                <div className="text-xs font-semibold text-slate-900">不注意 → ミスの傾向</div>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  移項時の符号落としやスペルミスなど「知っているのに落としたミス」は、科目をまたいで傾向ログ（計算・転記・読解・表記・最終確認）に集約します。
+                  符号ミスや写し間違いなどは科目をまたいで傾向ログ（計算・転記・読解・表記・最終確認）に記録します。
                 </p>
               </div>
             </div>
 
-            <div className="border-t border-slate-200 pt-4 text-xs text-slate-500">
+            <div className="border-t border-slate-200 pt-3 text-xs text-slate-500">
               現在の登録科目: {subjects.join(' · ')}
             </div>
           </div>

@@ -19,7 +19,24 @@ export function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
-function loadImageFromBlob(blob: Blob): Promise<HTMLImageElement> {
+export async function countPdfPages(blob: Blob): Promise<number> {
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const text = new TextDecoder('latin1').decode(bytes);
+  // Count individual /Type /Page dictionary objects (excluding /Pages)
+  const matches = text.match(/\/Type\s*\/Page\b(?!s)/g);
+  if (matches && matches.length > 0) {
+    return matches.length;
+  }
+  // Fallback: look for /Count N in Pages tree
+  const countMatch = text.match(/\/Type\s*\/Pages[\s\S]{0,300}?\/Count\s+(\d+)/);
+  if (countMatch) {
+    return Number(countMatch[1]) || 1;
+  }
+  return 1;
+}
+
+function loadImageFromBlobFallback(blob: Blob): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob);
     const img = new Image();
@@ -29,7 +46,7 @@ function loadImageFromBlob(blob: Blob): Promise<HTMLImageElement> {
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new Error('画像のデコードに失敗しました。JPG / PNG / WebP 形式をお試しください。'));
+      reject(new Error('IMAGE_DECODE_ERROR'));
     };
     img.src = url;
   });
@@ -92,11 +109,41 @@ export async function compressImageFileToJpeg(
   maxLongEdge = 1600,
   quality = 0.85
 ): Promise<CompressedImageResult> {
-  const img = await loadImageFromBlob(file);
-  const srcW = img.naturalWidth || img.width;
-  const srcH = img.naturalHeight || img.height;
-  const longEdge = Math.max(srcW, srcH);
+  const isHeic =
+    file.type === 'image/heic' ||
+    file.type === 'image/heif' ||
+    /\.heic$/i.test(file.name) ||
+    /\.heif$/i.test(file.name);
 
+  let drawable: ImageBitmap | HTMLImageElement;
+  let srcW = 0;
+  let srcH = 0;
+
+  try {
+    if (typeof createImageBitmap === 'function') {
+      // imageOrientation: 'from-image' ensures EXIF orientation is respected
+      const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      drawable = bitmap;
+      srcW = bitmap.width;
+      srcH = bitmap.height;
+    } else {
+      const img = await loadImageFromBlobFallback(file);
+      drawable = img;
+      srcW = img.naturalWidth || img.width;
+      srcH = img.naturalHeight || img.height;
+    }
+  } catch {
+    if (isHeic) {
+      throw new Error(
+        'HEIC形式の画像はこのブラウザでは読み込めません。カメラ設定でJPEGにするか、PNG/JPEGに書き出してからお試しください。'
+      );
+    }
+    throw new Error(
+      '画像の読み込みに失敗しました。JPEG または PNG 形式で再度お試しください。'
+    );
+  }
+
+  const longEdge = Math.max(srcW, srcH);
   const scale = longEdge > maxLongEdge ? maxLongEdge / longEdge : 1;
   const targetW = Math.max(1, Math.round(srcW * scale));
   const targetH = Math.max(1, Math.round(srcH * scale));
@@ -106,11 +153,13 @@ export async function compressImageFileToJpeg(
   canvas.height = targetH;
   const ctx = canvas.getContext('2d');
   if (!ctx) {
+    if ('close' in drawable) drawable.close();
     throw new Error('画像の縮小処理用 Canvas を初期化できませんでした。');
   }
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, targetW, targetH);
-  ctx.drawImage(img, 0, 0, targetW, targetH);
+  ctx.drawImage(drawable, 0, 0, targetW, targetH);
+  if ('close' in drawable) drawable.close();
 
   return canvasToCompressedJpeg(canvas, maxLongEdge, quality);
 }

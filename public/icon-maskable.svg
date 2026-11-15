@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Full-bleed solid navy background for Android maskable safe zone -->
+  <rect width="512" height="512" fill="#1E3A8A"/>
+  <!-- Centered within inner 80% safe zone (approx 102..410) -->
+  <g transform="translate(256, 256) scale(0.76) translate(-256, -256)">
+    <path fill="#FFFFFF" fill-rule="evenodd" d="
+      M 256 96
+      L 398 416
+      L 334 416
+      L 298 332
+      L 214 332
+      L 178 416
+      L 114 416
+      Z
+      M 256 196
+      L 228 286
+      L 284 286
+      Z
+    "/>
+    <path d="M 256 382 L 256 146" stroke="#93C5FD" stroke-width="24" stroke-linecap="round"/>
+    <path d="M 224 180 L 256 140 L 288 180" fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

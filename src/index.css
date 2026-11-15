@@ -2,19 +2,29 @@
 @import "katex/dist/katex.min.css";
 
 @layer base {
-  body {
-    font-family: "Plus Jakarta Sans", "Noto Sans JP", -apple-system, BlinkMacSystemFont, sans-serif;
+  html, body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
     background-color: #f8fafc;
-    color: #0f172a;
+    color: #1f2937;
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 
   code, pre, .font-mono {
-    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   }
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 .katex-display {
@@ -23,9 +33,11 @@
 }
 
 @media print {
-  body {
+  html, body {
     background-color: #ffffff !important;
-    color: #000000 !important;
+    color: #1f2937 !important;
+    padding: 0 !important;
+    margin: 0 !important;
   }
 
   .no-print {
@@ -39,5 +51,10 @@
     box-shadow: none !important;
     max-width: 100% !important;
     width: 100% !important;
+  }
+
+  .print-page-break {
+    break-before: page;
+    page-break-before: always;
   }
 }

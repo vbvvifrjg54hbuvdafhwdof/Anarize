@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#1E3A8A"/>
+  <!-- White bold geometric 'A' with prominent triangular hole (ana) -->
+  <path fill="#FFFFFF" fill-rule="evenodd" d="
+    M 256 96
+    L 398 416
+    L 334 416
+    L 298 332
+    L 214 332
+    L 178 416
+    L 114 416
+    Z
+    M 256 196
+    L 228 286
+    L 284 286
+    Z
+  "/>
+  <!-- Upward arrow emerging through the triangular hole -->
+  <path d="M 256 382 L 256 146" stroke="#93C5FD" stroke-width="22" stroke-linecap="round"/>
+  <path d="M 224 180 L 256 140 L 288 180" fill="none" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

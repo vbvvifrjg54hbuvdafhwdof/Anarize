@@ -18,7 +18,23 @@ export interface AppLimits {
   maxTendencyPerReview: number;
   maxNoteLength: number;
   maxToolRounds: number;
-  autoHideTendencyDays: number;
+  maxPdfPages: number;
+  autoHideTendencyReviews: number;
+}
+
+export interface PdfExportSettings {
+  displayMode: 'normal' | 'redsheet' | 'headings';
+  includeTendencies: boolean;
+  includeToc: boolean;
+  pageBreakPerUnit: boolean;
+  sortBy: 'folder' | 'mistakes';
+  showMistakeCount: boolean;
+  paperSize: 'A4' | 'B5' | 'A5' | 'A6';
+  orientation: 'portrait' | 'landscape';
+  fontSize: 'sm' | 'md' | 'lg';
+  columns: 1 | 2 | 3;
+  itemsPerPage: number | 'auto';
+  margin: 'normal' | 'narrow';
 }
 
 export interface KnowledgeItem {
@@ -50,6 +66,7 @@ export interface Tendency {
   subjects: string[];
   visible_in: string[];
   hidden: boolean;
+  unhidden_at?: string;
   occurrences: TendencyOccurrence[];
   created_at: string;
   updated_at: string;
@@ -94,6 +111,13 @@ export interface OrganizationProposal {
   resolved_at?: string;
 }
 
+export interface OperationLogEntry {
+  id: string;
+  timestamp: string;
+  action: string;
+  detail: string;
+}
+
 export interface AppState {
   subjects: string[];
   folders: string[];
@@ -101,10 +125,13 @@ export interface AppState {
   tendencies: Tendency[];
   reviews: ReviewRecord[];
   proposals: OrganizationProposal[];
+  logs: OperationLogEntry[];
   mode: OrganizationMode;
   limits: AppLimits;
+  pdfSettings: PdfExportSettings;
   consentAccepted: boolean;
   consentAcceptedAt?: string;
+  installGuideDismissed: boolean;
 }
 
 export interface ExportDataBundle {
@@ -116,8 +143,20 @@ export interface ExportDataBundle {
   tendencies: Tendency[];
   reviews: ReviewRecord[];
   proposals: OrganizationProposal[];
+  logs: OperationLogEntry[];
   mode: OrganizationMode;
   limits: AppLimits;
+  pdfSettings?: PdfExportSettings;
+}
+
+export interface ImportPreviewCounts {
+  subjects: number;
+  folders: number;
+  items: number;
+  tendencies: number;
+  reviews: number;
+  proposals: number;
+  logs: number;
 }
 
 export interface ReviewProgressEvent {
@@ -139,4 +178,5 @@ export interface AnswerAttachment {
   previewUrl: string;
   width?: number;
   height?: number;
+  pageCount?: number;
 }

@@ -1,6 +1,6 @@
 {
-  "name": "添削ノート",
-  "description": "ブラウザ完結型の大学受験答案添削・弱点分析アプリ。知識不足（単元別ノート）と不注意ミス（傾向ログ）を端末内のIndexedDBに蓄積し、PDF・Anki出力に対応。",
+  "name": "Anarize（アナライズ）",
+  "description": "答案を送るだけで、要復習と不注意ミスを自動で記録・整理するブラウザ完結型PWAアプリ。",
   "requestFramePermissions": ["camera"],
   "majorCapabilities": []
 }

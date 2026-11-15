@@ -1,5 +1,6 @@
 import {
   type Content,
+  type FunctionCall,
   type FunctionDeclaration,
   GoogleGenAI,
   type Part,
@@ -15,17 +16,28 @@ import {
 } from './toolExecutor.ts';
 
 function formatGeminiError(err: unknown): string {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return '通信できません。接続を確認して再試行してください。';
+  }
   const msg = err instanceof Error ? err.message : String(err);
+  if (
+    msg.includes('Failed to fetch') ||
+    msg.includes('NetworkError') ||
+    msg.includes('network') ||
+    msg.includes('ERR_INTERNET_DISCONNECTED')
+  ) {
+    return '通信できません。接続を確認して再試行してください。';
+  }
+  if (msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429')) {
+    return '今日の無料枠を使い切りました。時間をおいて再試行してください。';
+  }
   if (msg.includes('API_KEY_INVALID') || msg.includes('API key not valid') || msg.includes('400')) {
-    if (msg.includes('API')) {
-      return 'APIキーが無効です。「環境設定」のAPIキー欄を確認してください。';
+    if (msg.toLowerCase().includes('api')) {
+      return 'APIキーが正しくありません。前後に余分な空白が入っていないか確認してください。';
     }
   }
   if (msg.includes('PERMISSION_DENIED') || msg.includes('403')) {
-    return 'APIキーの権限がありません。Google AI Studio でキーの状態を確認してください。';
-  }
-  if (msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429')) {
-    return 'APIの利用上限（レート制限）に達しました。しばらく時間を置いてから再試行してください。';
+    return 'APIキーの権限がありません。Google AI Studio でキーの状態や年齢・地域の利用条件を確認してください。';
   }
   if (msg.includes('NOT_FOUND') || msg.includes('404')) {
     return '指定されたGeminiモデルが見つかりませんでした。';
@@ -34,6 +46,9 @@ function formatGeminiError(err: unknown): string {
 }
 
 export async function testApiKeyConnection(apiKey: string): Promise<{ ok: boolean; message: string }> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return { ok: false, message: '通信できません。接続を確認して再試行してください。' };
+  }
   const clean = apiKey.trim();
   if (!clean) {
     return { ok: false, message: 'APIキーを入力してください。' };
@@ -479,13 +494,22 @@ async function runGradingLoop(
   session: ActiveGradingSession,
   emit: (ev: ReviewProgressEvent) => void
 ): Promise<void> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    emit({
+      type: 'error',
+      code: 'OFFLINE',
+      message: '通信できません。接続を確認して再試行してください。',
+    });
+    return;
+  }
+
   const apiKey = getApiKey();
   if (!apiKey) {
     discardSession(session.sessionId);
     emit({
       type: 'error',
       code: 'MISSING_API_KEY',
-      message: 'Gemini APIキーが設定されていません。右上の「環境設定」からAPIキーを入力してください。',
+      message: 'Gemini APIキーが設定されていません。設定画面からAPIキーを入力してください。',
     });
     return;
   }
@@ -501,7 +525,7 @@ async function runGradingLoop(
       emit({
         type: 'error',
         code: 'MAX_ROUNDS_EXCEEDED',
-        message: `ツール呼び出しの上限（${maxRounds}往復）に達したため添削を中断しました。別の答案として再試行してください。`,
+        message: `ツール呼び出しの上限（${maxRounds}往復）に達したため添削を中断しました。再試行してください。`,
       });
       return;
     }
@@ -513,10 +537,10 @@ async function runGradingLoop(
       message:
         session.roundCount === 1
           ? '答案を読み取り、採点と分析を開始しています...'
-          : `AIチューターが分析を続けています（${session.roundCount}/${maxRounds}）...`,
+          : `分析を続けています（${session.roundCount}/${maxRounds}）...`,
     });
 
-    const response = await ai.models.generateContent({
+    const stream = await ai.models.generateContentStream({
       model: 'gemini-4-hydrogen',
       contents: session.contents,
       config: {
@@ -525,15 +549,31 @@ async function runGradingLoop(
       },
     });
 
-    const candidateContent = response.candidates?.[0]?.content;
-    if (candidateContent) {
-      session.contents.push(candidateContent);
+    const collectedParts: Part[] = [];
+    const functionCalls: FunctionCall[] = [];
+    let streamedText = '';
+
+    for await (const chunk of stream) {
+      const candidateParts = chunk.candidates?.[0]?.content?.parts;
+      if (candidateParts && candidateParts.length > 0) {
+        for (const p of candidateParts) {
+          collectedParts.push(p);
+          if (p.functionCall) {
+            functionCalls.push(p.functionCall);
+          }
+        }
+      }
+      if (chunk.text) {
+        streamedText += chunk.text;
+      }
     }
 
-    const functionCalls = response.functionCalls;
+    if (collectedParts.length > 0) {
+      session.contents.push({ role: 'model', parts: collectedParts });
+    }
 
-    if (!functionCalls || functionCalls.length === 0) {
-      const text = (response.text ?? '').trim();
+    if (functionCalls.length === 0) {
+      const text = streamedText.trim();
       if (text) {
         emit({
           type: 'clarification',
@@ -547,7 +587,7 @@ async function runGradingLoop(
       emit({
         type: 'error',
         code: 'EMPTY_RESPONSE',
-        message: 'AIからの応答を取得できませんでした。答案画像が鮮明か確認して再度お試しください。',
+        message: 'AIからの応答を取得できませんでした。答案画像が鮮明か確認して再試行してください。',
       });
       return;
     }
